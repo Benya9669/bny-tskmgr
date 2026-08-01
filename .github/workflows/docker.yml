@@ -57,8 +57,22 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run API tests
+      - name: Install browser test dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run API and browser tests
         run: python -m unittest discover -v
+
+      - name: Upload browser traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-traces
+          path: artifacts/browser-smoke
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Check source and API contract
         shell: bash

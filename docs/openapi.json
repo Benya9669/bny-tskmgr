@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
     "info": {
         "title": "TaskFlow API",
-        "version": "0.0.1",
+        "version": "0.0.2",
         "description": "Versioned API used by the TaskFlow web client and future offline-first Android client.",
         "license": {
             "name": "GNU Affero General Public License v3.0 only",
@@ -13,7 +13,9 @@
   "tags": [
     { "name": "Auth" },
     { "name": "Tasks" },
+    { "name": "Checklists" },
     { "name": "Projects" },
+    { "name": "Data" },
     { "name": "Sync" }
   ],
   "paths": {
@@ -81,6 +83,7 @@
       "get": {
         "tags": ["Projects"],
         "summary": "List active projects",
+        "parameters": [{ "name": "archived", "in": "query", "schema": { "type": "boolean" } }, { "name": "include_archived", "in": "query", "schema": { "type": "boolean" } }],
         "responses": { "200": { "description": "Projects", "content": { "application/json": { "schema": { "type": "object", "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "required": ["projects"] } } } } }
       },
       "post": {
@@ -112,6 +115,36 @@
           "200": { "$ref": "#/components/responses/Deleted" },
           "404": { "$ref": "#/components/responses/Error" }
         }
+      }
+    },
+    "/projects/{projectId}/archive": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectId" }],
+      "post": {
+        "tags": ["Projects"],
+        "summary": "Archive a project without detaching its tasks",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VersionGuard" } } } },
+        "responses": { "200": { "description": "Archived project", "content": { "application/json": { "schema": { "type": "object", "properties": { "project": { "$ref": "#/components/schemas/Project" } }, "required": ["project"] } } } }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      },
+      "delete": {
+        "tags": ["Projects"],
+        "summary": "Restore an archived project",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VersionGuard" } } } },
+        "responses": { "200": { "description": "Restored project", "content": { "application/json": { "schema": { "type": "object", "properties": { "project": { "$ref": "#/components/schemas/Project" } }, "required": ["project"] } } } }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/data/export": {
+      "get": {
+        "tags": ["Data"],
+        "summary": "Export active user data without account credentials",
+        "responses": { "200": { "description": "Portable TaskFlow export", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DataExport" } } } } }
+      }
+    },
+    "/data/import": {
+      "post": {
+        "tags": ["Data"],
+        "summary": "Atomically import copies with new UUIDs",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DataExport" } } } },
+        "responses": { "201": { "description": "Imported counts" }, "413": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/tasks": {
@@ -172,6 +205,50 @@
         }
       }
     },
+    "/checklist": {
+      "get": {
+        "tags": ["Checklists"],
+        "summary": "List active checklist items",
+        "parameters": [{ "name": "task_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Checklist items", "content": { "application/json": { "schema": { "type": "object", "properties": { "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ChecklistItem" } } }, "required": ["checklist_items"] } } } }
+        }
+      }
+    },
+    "/tasks/{taskId}/checklist": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskId" }],
+      "post": {
+        "tags": ["Checklists"],
+        "summary": "Add a one-level subtask to a task",
+        "parameters": [{ "name": "X-Client-ID", "in": "header", "description": "Client-generated UUID for offline creation", "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChecklistItemCreate" } } } },
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "type": "object", "properties": { "checklist_item": { "$ref": "#/components/schemas/ChecklistItem" } }, "required": ["checklist_item"] } } } },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/checklist/{checklistItemId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ChecklistItemId" }],
+      "patch": {
+        "tags": ["Checklists"],
+        "summary": "Update a subtask using optimistic locking",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChecklistItemUpdate" } } } },
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": { "type": "object", "properties": { "checklist_item": { "$ref": "#/components/schemas/ChecklistItem" } }, "required": ["checklist_item"] } } } },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "tags": ["Checklists"],
+        "summary": "Soft-delete a subtask",
+        "responses": { "200": { "$ref": "#/components/responses/Deleted" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/sync": {
       "get": {
         "tags": ["Sync"],
@@ -189,6 +266,7 @@
     "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
     "parameters": {
       "TaskId": { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "ChecklistItemId": { "name": "checklistItemId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "ProjectId": { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
     },
     "responses": {
@@ -208,10 +286,18 @@
       "TaskCreate": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "required": ["title"] }] },
       "TaskUpdate": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
       "Task": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "title", "status", "priority", "created_at", "updated_at", "version"] }] },
+      "ChecklistItemWrite": { "type": "object", "additionalProperties": false, "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 240 }, "is_done": { "type": "boolean" }, "position": { "type": "integer", "minimum": 0, "maximum": 1000000 } } },
+      "ChecklistItemCreate": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "type": "object", "required": ["title"] }] },
+      "ChecklistItemUpdate": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
+      "ChecklistItem": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "task_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "task_id", "title", "is_done", "position", "created_at", "updated_at", "version"] }] },
       "ProjectWrite": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "default": "#6d5dfc" } } },
-      "Project": { "allOf": [{ "$ref": "#/components/schemas/ProjectWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "name", "color", "created_at", "updated_at", "version"] }] },
+      "Project": { "allOf": [{ "$ref": "#/components/schemas/ProjectWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" }, "archived_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "name", "color", "created_at", "updated_at", "version"] }] },
+      "ExportProject": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "color": { "type": "string" }, "archived_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "name", "color"] },
+      "ExportTask": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id", "title"] }] },
+      "ExportChecklistItem": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "type": "object", "properties": { "id": { "type": "string" }, "task_id": { "type": "string" } }, "required": ["id", "task_id", "title"] }] },
+      "DataExport": { "type": "object", "properties": { "format": { "const": "taskflow-export" }, "version": { "const": 1 }, "exported_at": { "type": "string", "format": "date-time" }, "data": { "type": "object", "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/ExportProject" } }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/ExportTask" } }, "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ExportChecklistItem" } } }, "required": ["projects", "tasks", "checklist_items"] } }, "required": ["format", "version", "data"] },
       "VersionGuard": { "type": "object", "properties": { "expected_version": { "type": "integer", "minimum": 1 } } },
-      "SyncResponse": { "type": "object", "properties": { "cursor": { "type": "string", "format": "date-time" }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "required": ["cursor", "tasks", "projects"] },
+      "SyncResponse": { "type": "object", "properties": { "cursor": { "type": "string", "format": "date-time" }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } }, "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ChecklistItem" } } }, "required": ["cursor", "tasks", "projects", "checklist_items"] },
       "Error": { "type": "object", "properties": { "error": { "type": "object", "properties": { "code": { "type": "string" }, "message": { "type": "string" } }, "required": ["code", "message"] } }, "required": ["error"] }
     }
   }

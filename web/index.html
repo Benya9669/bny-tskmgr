@@ -11,12 +11,47 @@
       document.documentElement.dataset.theme = saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     })();
   </script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <section class="auth" id="authView">
+  <a class="skip-link" id="skipLink" href="#landingMain">Перейти к основному содержимому</a>
+  <section class="landing" id="landingView">
+    <header class="landing-header">
+      <a class="brand" href="#"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="25"></circle><circle class="orbit-dot" cx="72" cy="32" r="6"></circle><path d="m36 49 8 8 17-19"></path></svg></span> TaskFlow</a>
+      <nav aria-label="Разделы страницы"><a href="#landingFeatures">Возможности</a><a href="#selfHosted">Self-hosted</a><a href="https://github.com/Benya9669/bny-tskmgr">GitHub</a></nav>
+      <div><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button class="landing-login" type="button" data-open-auth="login">Войти</button></div>
+    </header>
+    <main class="landing-main" id="landingMain" tabindex="-1">
+      <section class="landing-hero">
+        <div class="landing-copy">
+          <p class="eyebrow"><i></i> SELF-HOSTED · ВАШИ ДАННЫЕ</p>
+          <h1>Спокойное место<br>для <em>важных дел.</em></h1>
+          <p>Задачи, планы и проекты встречаются в одном приватном пространстве — на вашем сервере.</p>
+          <div class="landing-actions"><button class="primary" type="button" data-open-auth="register">Создать пространство <span>→</span></button><button class="landing-text-button" type="button" data-open-auth="login">У меня уже есть аккаунт</button></div>
+          <small>AGPL-3.0 · Docker Compose · API для будущего Android-клиента</small>
+        </div>
+        <div class="landing-demo" aria-label="Демонстрация интерфейса TaskFlow">
+          <div class="landing-glow"></div>
+          <div class="landing-window">
+            <header><span><i></i><i></i><i></i></span><b>Мой день</b><em>•••</em></header>
+            <div class="landing-workspace">
+              <aside><span class="mini-orbit"><svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="25"></circle><circle class="orbit-dot" cx="72" cy="32" r="6"></circle><path d="m36 49 8 8 17-19"></path></svg></span><i class="active">◷</i><i>⌁</i><i>▦</i><i>☷</i></aside>
+              <section><p>СУББОТА, 1 АВГУСТА</p><h2>Сегодня</h2><div class="landing-progress"><span></span></div><div class="landing-tasks"><article class="complete"><i>✓</i><span><b>Опубликовать TaskFlow</b><small>Личное · готово</small></span></article><article><i></i><span><b>Продумать раздел заметок</b><small>TaskFlow · 35 мин</small></span></article><article><i></i><span><b>План на новую неделю</b><small>Личное · завтра</small></span></article></div></section>
+              <aside class="landing-note"><small>СКОРО · ЗАМЕТКИ</small><b>Идеи для релиза</b><p>Задачи превращаются в результат, а заметки сохранят контекст.</p><span>#taskflow　#roadmap</span></aside>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="landing-trust" id="selfHosted"><div><small>СВОЙ СЕРВЕР</small><b>Данные принадлежат вам</b></div><i></i><div><small>ОТКРЫТЫЙ КОД</small><b>Без обязательной подписки</b></div><i></i><div><small>ГОТОВ К РОСТУ</small><b>Web сегодня, Android завтра</b></div></section>
+      <section class="landing-features" id="landingFeatures"><header><p class="eyebrow">ЕДИНОЕ ПРОСТРАНСТВО</p><h2>Меньше переключений.<br><em>Больше ясности.</em></h2></header><div><article><span>01</span><i>✓</i><h3>Задачи</h3><p>Входящие, план на день, приоритеты и быстрый ввод с клавиатуры.</p></article><article><span>02</span><i>▦</i><h3>Канбан</h3><p>Наглядный процесс с переносом карточек между статусами.</p></article><article><span>03</span><i>⌁</i><h3>Self-hosted</h3><p>SQLite, резервное копирование и развёртывание через Docker Compose.</p></article><article class="coming"><span>СКОРО</span><i>✎</i><h3>Заметки</h3><p>Связанный с задачами контекст, Markdown и внутренние ссылки.</p></article></div></section>
+    </main>
+    <footer class="landing-footer"><a class="brand" href="#"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="25"></circle><circle class="orbit-dot" cx="72" cy="32" r="6"></circle><path d="m36 49 8 8 17-19"></path></svg></span> TaskFlow</a><p>Ваши планы. Ваш сервер. Ваш ритм.</p><button type="button" data-open-auth="register">Начать работу →</button></footer>
+  </section>
+
+  <section class="auth" id="authView" hidden>
     <div class="auth-copy">
-      <a class="brand" href="#"><span>TF</span> TaskFlow</a>
+      <a class="brand" href="#"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="25"></circle><circle class="orbit-dot" cx="72" cy="32" r="6"></circle><path d="m36 49 8 8 17-19"></path></svg></span> TaskFlow</a>
       <div>
         <p class="eyebrow">SELF-HOSTED · ВАШИ ДАННЫЕ</p>
         <h1>Планы обретают<br><em>ясность.</em></h1>
@@ -25,6 +60,7 @@
       <p class="fine">Работает на вашем сервере. Готов к синхронизации с Android.</p>
     </div>
     <div class="auth-panel">
+      <button class="auth-back" type="button" data-back-landing>← На главную</button>
       <button class="theme-toggle auth-theme" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button>
       <form id="authForm" class="auth-card">
         <p class="eyebrow" id="authEyebrow">С ВОЗВРАЩЕНИЕМ</p>
@@ -44,7 +80,7 @@
   <div class="app" id="appView" hidden>
     <aside class="sidebar">
       <div>
-        <a class="brand" href="#"><span>TF</span> TaskFlow</a>
+        <a class="brand" href="#"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="25"></circle><circle class="orbit-dot" cx="72" cy="32" r="6"></circle><path d="m36 49 8 8 17-19"></path></svg></span> TaskFlow</a>
         <nav>
           <button class="nav-item active" data-filter="today"><span>◷</span> Сегодня <b id="todayCount">0</b></button>
           <button class="nav-item" data-filter="inbox"><span>⌁</span> Входящие <b id="inboxCount">0</b></button>
@@ -52,22 +88,35 @@
           <button class="nav-item" data-filter="all"><span>☷</span> Все задачи</button>
           <button class="nav-item" data-filter="done"><span>✓</span> Выполненные</button>
         </nav>
-        <div class="projects-head"><p>ПРОЕКТЫ</p><button id="newProject" aria-label="Новый проект">+</button></div>
+        <div class="projects-head"><p>ПРОЕКТЫ</p><div><button id="projectArchive" aria-label="Открыть архив проектов" title="Архив проектов">⌂</button><button id="newProject" aria-label="Новый проект">+</button></div></div>
         <div id="projectList" class="project-list"></div>
       </div>
       <button class="profile" id="logout"><span id="avatar">?</span><span><strong id="userName">Пользователь</strong><small id="profileMeta">Выйти</small></span></button>
     </aside>
 
-    <main>
-      <header class="mobile-head"><a class="brand" href="#"><span>TF</span> TaskFlow</a><div><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button id="mobileLogout">Выйти</button></div></header>
+    <main id="appMain" tabindex="-1">
+      <header class="mobile-head"><a class="brand" href="#"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="25"></circle><circle class="orbit-dot" cx="72" cy="32" r="6"></circle><path d="m36 49 8 8 17-19"></path></svg></span> TaskFlow</a><div><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button id="mobileLogout">Выйти</button></div></header>
       <div class="mobile-projects" id="mobileProjectList" aria-label="Проекты"></div>
       <div class="topbar">
         <div><p class="eyebrow" id="viewEyebrow">ВАШ ДЕНЬ</p><h1 id="viewTitle">Сегодня</h1><p id="dateLabel"></p></div>
-        <div class="top-actions"><div class="view-switcher" aria-label="Представление задач"><button class="active" type="button" data-task-view="list">☷ <span>Список</span></button><button type="button" data-task-view="board">▦ <span>Доска</span></button></div><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button class="primary add-button" id="addTask">＋ Новая задача</button></div>
+        <div class="top-actions"><div class="view-switcher" aria-label="Представление задач"><button class="active" type="button" data-task-view="list">☷ <span>Список</span></button><button type="button" data-task-view="board">▦ <span>Доска</span></button></div><button class="icon-button data-tools-button" id="dataTools" type="button" aria-label="Экспорт и импорт данных" title="Данные">⇅</button><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button class="primary add-button" id="addTask" type="button" aria-keyshortcuts="N" title="Новая задача (N)">＋ <span class="add-label">Новая задача</span><kbd>N</kbd></button></div>
       </div>
       <section class="progress-card">
         <div><p>Дневной прогресс</p><strong id="progressText">0 из 0 задач</strong></div>
-        <div class="progress"><i id="progressBar"></i></div><span id="progressPercent">0%</span>
+        <div class="progress" id="dailyProgress" role="progressbar" aria-label="Дневной прогресс" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="progressBar"></i></div><span id="progressPercent">0%</span>
+      </section>
+      <section class="task-tools" aria-label="Поиск и фильтры задач">
+        <label class="task-search"><span aria-hidden="true">⌕</span><input id="taskSearch" type="search" placeholder="Найти задачу…" autocomplete="off" aria-keyshortcuts="/"><kbd>/</kbd></label>
+        <button class="filter-toggle" id="filterToggle" type="button" aria-expanded="false" aria-controls="filterPanel">Фильтры <span id="filterCount" hidden>0</span></button>
+        <small id="filterResult">0 задач</small>
+        <div class="filter-panel" id="filterPanel" hidden>
+          <label>Проект<select id="filterProject" data-task-filter="project"><option value="all">Все проекты</option><option value="none">Без проекта</option></select></label>
+          <label>Статус<select id="filterStatus" data-task-filter="status"><option value="all">Все статусы</option><option value="inbox">Входящие</option><option value="todo">Запланировано</option><option value="in_progress">В работе</option><option value="done">Выполнено</option></select></label>
+          <label>Приоритет<select id="filterPriority" data-task-filter="priority"><option value="all">Все приоритеты</option><option value="urgent">Срочный</option><option value="high">Высокий</option><option value="normal">Обычный</option><option value="low">Низкий</option></select></label>
+          <label>Дата<select id="filterDate" data-task-filter="date"><option value="all">Любая дата</option><option value="today">Запланировано сегодня</option><option value="overdue">Просроченный срок</option><option value="unscheduled">Без даты планирования</option><option value="range">Диапазон планирования</option></select></label>
+          <div class="filter-dates" id="filterDates" hidden><label>От<input id="filterDateFrom" type="date" data-task-filter="dateFrom"></label><label>До<input id="filterDateTo" type="date" data-task-filter="dateTo"></label></div>
+          <button class="clear-filters" id="clearFilters" type="button">Сбросить всё</button>
+        </div>
       </section>
       <section class="task-section">
         <div class="section-head"><h2 id="listTitle">План на сегодня</h2><div class="segmented"><button class="active" data-sort="priority">Приоритет</button><button data-sort="created">Новые</button></div></div>
@@ -87,34 +136,111 @@
     </nav>
   </div>
 
-  <dialog id="taskDialog">
-    <form id="taskForm" method="dialog">
-      <div class="dialog-head"><div><p class="eyebrow">ЗАДАЧА</p><h2 id="dialogTitle">Новая задача</h2></div><button type="button" class="close" data-close>×</button></div>
+  <dialog id="taskDialog" aria-labelledby="dialogTitle">
+    <form id="taskForm" method="dialog" aria-labelledby="dialogTitle">
+      <div class="dialog-head"><div><p class="eyebrow">ЗАДАЧА</p><h2 id="dialogTitle">Новая задача</h2></div><button type="button" class="close" data-close aria-label="Закрыть">×</button></div>
       <input type="hidden" name="id">
       <label>Название<input name="title" maxlength="240" placeholder="Что нужно сделать?" required autofocus></label>
       <label>Описание<textarea name="description" rows="3" placeholder="Детали, заметки, ссылки…"></textarea></label>
       <div class="form-grid">
-        <label>Дата<input name="scheduled_date" type="date"></label>
+        <label>Дата планирования<input name="scheduled_date" type="date"></label>
+        <label>Срок выполнения<input name="due_at" type="datetime-local" step="60"></label>
         <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="urgent">Срочный</option><option value="low">Низкий</option></select></label>
         <label>Статус<select name="status"><option value="inbox">Входящие</option><option value="todo">Запланировано</option><option value="in_progress">В работе</option><option value="done">Выполнено</option></select></label>
         <label>Проект<select name="project_id" id="projectSelect"><option value="">Без проекта</option></select></label>
         <label>Оценка, мин<input name="estimated_minutes" type="number" min="1" max="10080" placeholder="30"></label>
       </div>
       <p class="form-error" id="taskError"></p>
-      <div class="dialog-actions"><button class="secondary" type="button" data-close>Отмена</button><button class="primary" type="submit">Сохранить</button></div>
+      <div class="dialog-actions"><span class="dialog-shortcut"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> — сохранить</span><button class="secondary" type="button" data-close>Отмена</button><button class="primary" type="submit" aria-keyshortcuts="Control+Enter Meta+Enter">Сохранить</button></div>
     </form>
   </dialog>
-  <dialog id="projectDialog">
-    <form id="projectForm" method="dialog">
-      <div class="dialog-head"><div><p class="eyebrow">ПРОЕКТ</p><h2 id="projectDialogTitle">Новый проект</h2></div><button type="button" class="close" data-project-close>×</button></div>
+  <dialog id="projectDialog" aria-labelledby="projectDialogTitle">
+    <form id="projectForm" method="dialog" aria-labelledby="projectDialogTitle">
+      <div class="dialog-head"><div><p class="eyebrow">ПРОЕКТ</p><h2 id="projectDialogTitle">Новый проект</h2></div><button type="button" class="close" data-project-close aria-label="Закрыть">×</button></div>
       <input type="hidden" name="id">
       <label>Название<input name="name" maxlength="100" placeholder="Например, Запуск продукта" required></label>
-      <label>Цвет<input name="color" type="color" value="#6d5dfc"></label>
+      <fieldset class="project-color-field">
+        <legend>Цвет</legend>
+        <div class="project-color-picker">
+          <div class="project-color-preview"><i id="projectColorPreview"></i><span><strong id="projectColorName">Фиолетовый</strong><small>Цвет проекта в списках и карточках</small></span></div>
+          <div class="color-swatches" role="radiogroup" aria-label="Цвет проекта">
+            <button type="button" data-project-color="#6d5dfc" aria-label="Фиолетовый"></button>
+            <button type="button" data-project-color="#3b82f6" aria-label="Синий"></button>
+            <button type="button" data-project-color="#06a5a5" aria-label="Бирюзовый"></button>
+            <button type="button" data-project-color="#22a447" aria-label="Зелёный"></button>
+            <button type="button" data-project-color="#84a920" aria-label="Лаймовый"></button>
+            <button type="button" data-project-color="#e8a126" aria-label="Янтарный"></button>
+            <button type="button" data-project-color="#e2653f" aria-label="Оранжевый"></button>
+            <button type="button" data-project-color="#df4f68" aria-label="Красный"></button>
+            <button type="button" data-project-color="#d14fa2" aria-label="Розовый"></button>
+            <button type="button" data-project-color="#7b6f68" aria-label="Коричневый"></button>
+            <button type="button" data-project-color="#64748b" aria-label="Серый"></button>
+            <button type="button" data-project-color="#252724" aria-label="Графитовый"></button>
+          </div>
+          <label class="color-hex" for="projectColorHex">Свой HEX<input id="projectColorHex" maxlength="7" inputmode="text" autocomplete="off" spellcheck="false" value="#6d5dfc"></label>
+          <input id="projectColorValue" name="color" type="hidden" value="#6d5dfc">
+        </div>
+      </fieldset>
       <p class="form-error" id="projectError"></p>
-      <div class="dialog-actions"><button class="danger" id="deleteProject" type="button" hidden>Удалить</button><span class="dialog-spacer"></span><button class="secondary" type="button" data-project-close>Отмена</button><button class="primary" type="submit">Сохранить</button></div>
+      <div class="dialog-actions"><button class="danger" id="deleteProject" type="button" hidden>Удалить</button><button class="secondary" id="archiveProject" type="button" hidden>В архив</button><span class="dialog-spacer"></span><button class="secondary" type="button" data-project-close>Отмена</button><button class="primary" type="submit">Сохранить</button></div>
     </form>
   </dialog>
-  <div id="toast" class="toast"></div>
+  <dialog id="archiveDialog" aria-labelledby="archiveTitle">
+    <div class="utility-dialog">
+      <div class="dialog-head"><div><p class="eyebrow">ПРОЕКТЫ</p><h2 id="archiveTitle">Архив проектов</h2></div><button type="button" class="close" data-archive-close aria-label="Закрыть">×</button></div>
+      <p class="dialog-description">Архивные проекты скрыты из рабочих списков, но все их задачи сохранены.</p>
+      <div id="archiveList" class="archive-list"></div>
+      <div id="archiveEmpty" class="utility-empty"><span>⌂</span><strong>Архив пуст</strong><small>Здесь появятся проекты, которые вы отложили.</small></div>
+      <p class="form-error" id="archiveError"></p>
+      <div class="dialog-actions"><button class="secondary" type="button" data-archive-close>Закрыть</button></div>
+    </div>
+  </dialog>
+  <dialog id="dataDialog" aria-labelledby="dataDialogTitle">
+    <div class="utility-dialog">
+      <div class="dialog-head"><div><p class="eyebrow">ВАШИ ДАННЫЕ</p><h2 id="dataDialogTitle">Экспорт и импорт</h2></div><button type="button" class="close" data-data-close aria-label="Закрыть">×</button></div>
+      <p class="dialog-description">Экспорт содержит проекты, задачи и чек-листы без аккаунта и пароля. Импорт добавляет копии и не перезаписывает существующие данные.</p>
+      <div class="data-actions">
+        <section><span aria-hidden="true">↓</span><div><strong>Скачать JSON</strong><small>Резервная переносимая копия данных.</small></div><button class="primary" id="exportData" type="button">Экспортировать</button></section>
+        <section><span aria-hidden="true">↑</span><div><strong>Импортировать JSON</strong><small>До 1 МБ; операция выполняется атомарно.</small></div><label class="secondary file-button" for="importDataFile">Выбрать файл</label><input id="importDataFile" type="file" accept="application/json,.json"></section>
+      </div>
+      <p class="form-error" id="dataError"></p><p class="form-success" id="dataSuccess" role="status"></p>
+      <div class="dialog-actions"><button class="secondary" type="button" data-data-close>Закрыть</button></div>
+    </div>
+  </dialog>
+  <dialog id="moveTaskDialog" aria-labelledby="moveTaskTitle">
+    <form id="moveTaskForm" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">ПЕРЕНОС</p><h2 id="moveTaskTitle">Изменить место и день</h2></div><button type="button" class="close" data-move-close aria-label="Закрыть">×</button></div>
+      <input type="hidden" name="id">
+      <p class="move-task-name" id="moveTaskName"></p>
+      <label>Проект<select name="project_id" id="moveProjectSelect"><option value="">Без проекта</option></select></label>
+      <label>Дата планирования<input name="scheduled_date" id="moveScheduledDate" type="date"></label>
+      <div class="quick-dates" aria-label="Быстрый выбор даты"><button type="button" data-move-date="today">Сегодня</button><button type="button" data-move-date="tomorrow">Завтра</button><button type="button" data-move-date="none">Без даты</button></div>
+      <p class="form-error" id="moveTaskError"></p>
+      <div class="dialog-actions"><button class="secondary" type="button" data-move-close>Отмена</button><button class="primary" type="submit">Перенести</button></div>
+    </form>
+  </dialog>
+  <dialog id="checklistDialog" class="checklist-dialog" aria-labelledby="checklistTitle">
+    <div class="checklist-shell">
+      <div class="dialog-head"><div><p class="eyebrow">ПОДЗАДАЧИ</p><h2 id="checklistTitle">Чек-лист</h2></div><button type="button" class="close" data-checklist-close aria-label="Закрыть">×</button></div>
+      <div class="checklist-summary"><span id="checklistProgressText">0 из 0</span><div class="progress" id="checklistProgress" role="progressbar" aria-label="Прогресс подзадач" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="checklistProgressBar"></i></div></div>
+      <form id="checklistAddForm" class="checklist-add">
+        <label for="checklistNewTitle">Новая подзадача</label>
+        <div><input id="checklistNewTitle" name="title" maxlength="240" placeholder="Например, проверить результат" required><button class="primary" type="submit">Добавить</button></div>
+      </form>
+      <p class="form-error" id="checklistError"></p>
+      <div id="checklistItems" class="checklist-items"></div>
+      <div id="checklistEmpty" class="checklist-empty"><span>✓</span><strong>Разбейте задачу на понятные шаги</strong><small>Добавьте первую подзадачу выше.</small></div>
+    </div>
+  </dialog>
+  <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <div class="confirm-shell">
+      <span class="confirm-icon" aria-hidden="true">!</span>
+      <div class="confirm-copy"><p class="eyebrow">ПОДТВЕРЖДЕНИЕ</p><h2 id="confirmTitle">Подтвердите действие</h2><p id="confirmMessage"></p></div>
+      <div class="dialog-actions"><button class="secondary" id="confirmCancel" type="button">Отмена</button><button class="danger" id="confirmAccept" type="button">Продолжить</button></div>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="srStatus" class="sr-only" role="status" aria-live="polite"></div>
   <script src="/app.js"></script>
 </body>
 </html>

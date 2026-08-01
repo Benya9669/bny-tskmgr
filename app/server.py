@@ -40,7 +40,9 @@ SMTP_FROM = os.getenv("TASKFLOW_SMTP_FROM", "")
 VERIFICATION_TTL_HOURS = int(os.getenv("TASKFLOW_VERIFICATION_TTL_HOURS", "24"))
 VERSION_FILE = ROOT / "VERSION"
 APP_VERSION = os.getenv("TASKFLOW_VERSION", VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "development")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
+EXPORT_FORMAT = "taskflow-export"
+EXPORT_VERSION = 1
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("taskflow")
@@ -104,7 +106,8 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 version INTEGER NOT NULL DEFAULT 1,
-                deleted_at TEXT
+                deleted_at TEXT,
+                archived_at TEXT
             );
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
@@ -126,6 +129,22 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS tasks_owner_updated ON tasks(owner_id, updated_at);
             CREATE INDEX IF NOT EXISTS tasks_owner_schedule ON tasks(owner_id, scheduled_date);
+            CREATE TABLE IF NOT EXISTS checklist_items (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL REFERENCES users(id),
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                title TEXT NOT NULL,
+                is_done INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                deleted_at TEXT,
+                CHECK(is_done IN (0,1)),
+                CHECK(position >= 0)
+            );
+            CREATE INDEX IF NOT EXISTS checklist_owner_updated ON checklist_items(owner_id, updated_at);
+            CREATE INDEX IF NOT EXISTS checklist_task_position ON checklist_items(task_id, position, created_at);
             CREATE TABLE IF NOT EXISTS email_verification_tokens (
                 token_hash TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -140,6 +159,10 @@ def init_db() -> None:
                 db.execute("ALTER TABLE users ADD COLUMN email_verified_at TEXT")
             # Accounts created before email verification existed remain usable.
             db.execute("UPDATE users SET email_verified_at=created_at WHERE email_verified_at IS NULL")
+        if current_version < 4:
+            project_columns = {row[1] for row in db.execute("PRAGMA table_info(projects)").fetchall()}
+            if "archived_at" not in project_columns:
+                db.execute("ALTER TABLE projects ADD COLUMN archived_at TEXT")
         if current_version < SCHEMA_VERSION:
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -185,6 +208,12 @@ def verify_token(token: str) -> str | None:
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
+
+
+def checklist_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["is_done"] = bool(item["is_done"])
+    return item
 
 
 class ApiError(Exception):
@@ -271,7 +300,7 @@ def validate_task(data: dict[str, Any], partial: bool = False) -> dict[str, Any]
     if "priority" in clean and clean["priority"] not in PRIORITIES:
         raise ApiError(422, "invalid_priority", "Неизвестный приоритет")
     if "description" in clean:
-        clean["description"] = str(clean["description"]).strip()
+        clean["description"] = "" if clean["description"] is None else str(clean["description"]).strip()
     if "scheduled_date" in clean and clean["scheduled_date"]:
         try:
             datetime.strptime(clean["scheduled_date"], "%Y-%m-%d")
@@ -457,16 +486,28 @@ class Application:
                 user = db.execute("SELECT id,email,display_name,created_at,email_verified_at FROM users WHERE id=?", (user_id,)).fetchone()
             return self.json_response(200, {"user": row_dict(user)})
         if path == "/api/v1/projects" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            archive_filter = "" if query.get("include_archived") == ["true"] else (" AND archived_at IS NOT NULL" if query.get("archived") == ["true"] else " AND archived_at IS NULL")
             with connect() as db:
-                rows = db.execute("SELECT * FROM projects WHERE owner_id=? AND deleted_at IS NULL ORDER BY name", (user_id,)).fetchall()
+                rows = db.execute(f"SELECT * FROM projects WHERE owner_id=? AND deleted_at IS NULL{archive_filter} ORDER BY name", (user_id,)).fetchall()
             return self.json_response(200, {"projects": [dict(row) for row in rows]})
         if path == "/api/v1/projects" and method == "POST":
             data, timestamp = self.body(environ), now_iso()
             project_data = self.validate_project(data)
-            project = {"id": str(uuid.uuid4()), "owner_id": user_id, **project_data, "created_at": timestamp, "updated_at": timestamp, "version": 1, "deleted_at": None}
+            project = {"id": str(uuid.uuid4()), "owner_id": user_id, **project_data, "created_at": timestamp, "updated_at": timestamp, "version": 1, "deleted_at": None, "archived_at": None}
             with connect() as db:
-                db.execute("INSERT INTO projects VALUES (:id,:owner_id,:name,:color,:created_at,:updated_at,:version,:deleted_at)", project)
+                db.execute("INSERT INTO projects(id,owner_id,name,color,created_at,updated_at,version,deleted_at,archived_at) VALUES (:id,:owner_id,:name,:color,:created_at,:updated_at,:version,:deleted_at,:archived_at)", project)
             return self.json_response(201, {"project": project})
+        project_archive = re.fullmatch(r"/api/v1/projects/([^/]+)/archive", path)
+        if project_archive:
+            if method == "POST":
+                return self.set_project_archived(user_id, project_archive.group(1), True, self.body(environ))
+            if method == "DELETE":
+                return self.set_project_archived(user_id, project_archive.group(1), False, self.body(environ))
+        if path == "/api/v1/data/export" and method == "GET":
+            return self.export_data(user_id)
+        if path == "/api/v1/data/import" and method == "POST":
+            return self.import_data(user_id, self.body(environ))
         if path == "/api/v1/tasks" and method == "GET":
             query = parse_qs(environ.get("QUERY_STRING", ""))
             where, params = ["owner_id=?", "deleted_at IS NULL"], [user_id]
@@ -487,6 +528,25 @@ class Application:
             except sqlite3.IntegrityError as exc:
                 raise ApiError(409, "conflict", "Идентификатор уже используется или проект не существует") from exc
             return self.json_response(201, {"task": task})
+        if path == "/api/v1/checklist" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            where, params = ["owner_id=?", "deleted_at IS NULL"], [user_id]
+            if query.get("task_id"):
+                where.append("task_id=?")
+                params.append(query["task_id"][0])
+            with connect() as db:
+                rows = db.execute(f"SELECT * FROM checklist_items WHERE {' AND '.join(where)} ORDER BY task_id,position,created_at", params).fetchall()
+            return self.json_response(200, {"checklist_items": [checklist_dict(row) for row in rows]})
+        checklist_create = re.fullmatch(r"/api/v1/tasks/([^/]+)/checklist", path)
+        if checklist_create and method == "POST":
+            return self.create_checklist_item(user_id, checklist_create.group(1), environ)
+        checklist_item = re.fullmatch(r"/api/v1/checklist/([^/]+)", path)
+        if checklist_item:
+            item_id = checklist_item.group(1)
+            if method == "PATCH":
+                return self.update_checklist_item(user_id, item_id, self.body(environ))
+            if method == "DELETE":
+                return self.delete_checklist_item(user_id, item_id)
         if path == "/api/v1/sync" and method == "GET":
             since = parse_qs(environ.get("QUERY_STRING", "")).get("since", ["1970-01-01T00:00:00.000Z"])[0]
             try:
@@ -500,7 +560,8 @@ class Application:
             with connect() as db:
                 tasks = db.execute("SELECT * FROM tasks WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
                 projects = db.execute("SELECT * FROM projects WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-            return self.json_response(200, {"cursor": server_time, "tasks": [dict(row) for row in tasks], "projects": [dict(row) for row in projects]})
+                checklist_items = db.execute("SELECT * FROM checklist_items WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
+            return self.json_response(200, {"cursor": server_time, "tasks": [dict(row) for row in tasks], "projects": [dict(row) for row in projects], "checklist_items": [checklist_dict(row) for row in checklist_items]})
         if path.startswith("/api/v1/tasks/"):
             task_id = path.rsplit("/", 1)[-1]
             if method == "PATCH":
@@ -542,11 +603,72 @@ class Application:
             updated = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return self.json_response(200, {"task": dict(updated)})
 
+    def validate_checklist_item(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+        clean: dict[str, Any] = {}
+        if not partial or "title" in data:
+            title = str(data.get("title", "")).strip()
+            if not title or len(title) > 240:
+                raise ApiError(422, "invalid_title", "Название подзадачи должно содержать от 1 до 240 символов")
+            clean["title"] = title
+        if "is_done" in data:
+            if not isinstance(data["is_done"], bool):
+                raise ApiError(422, "invalid_is_done", "is_done должен быть логическим значением")
+            clean["is_done"] = int(data["is_done"])
+        if "position" in data:
+            if isinstance(data["position"], bool) or not isinstance(data["position"], int) or not 0 <= data["position"] <= 1_000_000:
+                raise ApiError(422, "invalid_position", "position должен быть целым числом от 0 до 1000000")
+            clean["position"] = data["position"]
+        return clean
+
+    def create_checklist_item(self, user_id: str, task_id: str, environ: dict[str, Any]):
+        data = self.validate_checklist_item(self.body(environ))
+        timestamp = now_iso()
+        with connect() as db:
+            task = db.execute("SELECT 1 FROM tasks WHERE id=? AND owner_id=? AND deleted_at IS NULL", (task_id, user_id)).fetchone()
+            if not task:
+                raise ApiError(404, "not_found", "Задача не найдена")
+            if "position" not in data:
+                row = db.execute("SELECT COALESCE(MAX(position),-1)+1 FROM checklist_items WHERE task_id=? AND owner_id=? AND deleted_at IS NULL", (task_id, user_id)).fetchone()
+                data["position"] = row[0]
+            item = {"id": str(self.body_id(environ, data) or uuid.uuid4()), "owner_id": user_id, "task_id": task_id, "title": data["title"], "is_done": data.get("is_done", 0), "position": data["position"], "created_at": timestamp, "updated_at": timestamp, "version": 1, "deleted_at": None}
+            try:
+                db.execute("INSERT INTO checklist_items VALUES (:id,:owner_id,:task_id,:title,:is_done,:position,:created_at,:updated_at,:version,:deleted_at)", item)
+            except sqlite3.IntegrityError as exc:
+                raise ApiError(409, "conflict", "Идентификатор подзадачи уже используется") from exc
+        item["is_done"] = bool(item["is_done"])
+        return self.json_response(201, {"checklist_item": item})
+
+    def update_checklist_item(self, user_id: str, item_id: str, payload: dict[str, Any]):
+        expected = payload.pop("expected_version", None)
+        data = self.validate_checklist_item(payload, partial=True)
+        if not data:
+            raise ApiError(422, "empty_update", "Нет полей для обновления")
+        with connect() as db:
+            current = db.execute("SELECT * FROM checklist_items WHERE id=? AND owner_id=? AND deleted_at IS NULL", (item_id, user_id)).fetchone()
+            if not current:
+                raise ApiError(404, "not_found", "Подзадача не найдена")
+            self.ensure_version(expected, current["version"], "Подзадача")
+            data.update({"updated_at": now_iso(), "version": current["version"] + 1})
+            assignments = ",".join(f"{key}=?" for key in data)
+            db.execute(f"UPDATE checklist_items SET {assignments} WHERE id=? AND owner_id=?", (*data.values(), item_id, user_id))
+            updated = db.execute("SELECT * FROM checklist_items WHERE id=?", (item_id,)).fetchone()
+        item = dict(updated)
+        item["is_done"] = bool(item["is_done"])
+        return self.json_response(200, {"checklist_item": item})
+
+    def delete_checklist_item(self, user_id: str, item_id: str):
+        timestamp = now_iso()
+        with connect() as db:
+            result = db.execute("UPDATE checklist_items SET deleted_at=?,updated_at=?,version=version+1 WHERE id=? AND owner_id=? AND deleted_at IS NULL", (timestamp, timestamp, item_id, user_id))
+        if not result.rowcount:
+            raise ApiError(404, "not_found", "Подзадача не найдена")
+        return self.json_response(200, {"deleted": True, "id": item_id, "updated_at": timestamp})
+
     def ensure_project(self, user_id: str, project_id: str | None) -> None:
         if not project_id:
             return
         with connect() as db:
-            exists = db.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=? AND deleted_at IS NULL", (project_id, user_id)).fetchone()
+            exists = db.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=? AND deleted_at IS NULL AND archived_at IS NULL", (project_id, user_id)).fetchone()
         if not exists:
             raise ApiError(422, "invalid_project", "Проект не существует")
 
@@ -580,7 +702,7 @@ class Application:
         if not data:
             raise ApiError(422, "empty_update", "Нет полей для обновления")
         with connect() as db:
-            current = db.execute("SELECT * FROM projects WHERE id=? AND owner_id=? AND deleted_at IS NULL", (project_id, user_id)).fetchone()
+            current = db.execute("SELECT * FROM projects WHERE id=? AND owner_id=? AND deleted_at IS NULL AND archived_at IS NULL", (project_id, user_id)).fetchone()
             if not current:
                 raise ApiError(404, "not_found", "Проект не найден")
             self.ensure_version(expected, current["version"], "Запись проекта")
@@ -589,6 +711,86 @@ class Application:
             db.execute(f"UPDATE projects SET {assignments} WHERE id=? AND owner_id=?", (*data.values(), project_id, user_id))
             updated = db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         return self.json_response(200, {"project": dict(updated)})
+
+    def set_project_archived(self, user_id: str, project_id: str, archived: bool, payload: dict[str, Any]):
+        expected = payload.pop("expected_version", None)
+        if payload:
+            raise ApiError(422, "invalid_archive_request", "Запрос архива содержит неизвестные поля")
+        with connect() as db:
+            current = db.execute("SELECT * FROM projects WHERE id=? AND owner_id=? AND deleted_at IS NULL", (project_id, user_id)).fetchone()
+            if not current:
+                raise ApiError(404, "not_found", "Проект не найден")
+            self.ensure_version(expected, current["version"], "Проект")
+            if bool(current["archived_at"]) == archived:
+                return self.json_response(200, {"project": dict(current)})
+            timestamp = now_iso()
+            db.execute("UPDATE projects SET archived_at=?,updated_at=?,version=version+1 WHERE id=? AND owner_id=?", (timestamp if archived else None, timestamp, project_id, user_id))
+            updated = db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+        return self.json_response(200, {"project": dict(updated)})
+
+    def export_data(self, user_id: str):
+        with connect() as db:
+            projects = db.execute("SELECT id,name,color,archived_at FROM projects WHERE owner_id=? AND deleted_at IS NULL ORDER BY created_at", (user_id,)).fetchall()
+            tasks = db.execute("SELECT id,project_id,title,description,status,priority,scheduled_date,due_at,estimated_minutes FROM tasks WHERE owner_id=? AND deleted_at IS NULL ORDER BY created_at", (user_id,)).fetchall()
+            checklist_items = db.execute("SELECT id,task_id,title,is_done,position FROM checklist_items WHERE owner_id=? AND deleted_at IS NULL ORDER BY task_id,position,created_at", (user_id,)).fetchall()
+        return self.json_response(200, {"format": EXPORT_FORMAT, "version": EXPORT_VERSION, "exported_at": now_iso(), "data": {"projects": [dict(row) for row in projects], "tasks": [dict(row) for row in tasks], "checklist_items": [checklist_dict(row) for row in checklist_items]}})
+
+    def import_data(self, user_id: str, payload: dict[str, Any]):
+        if payload.get("format") != EXPORT_FORMAT or isinstance(payload.get("version"), bool) or payload.get("version") != EXPORT_VERSION or not isinstance(payload.get("data"), dict):
+            raise ApiError(422, "invalid_import_format", "Файл не является совместимым экспортом TaskFlow")
+        data = payload["data"]
+        projects, tasks, checklist_items = data.get("projects"), data.get("tasks"), data.get("checklist_items")
+        if not all(isinstance(items, list) for items in (projects, tasks, checklist_items)):
+            raise ApiError(422, "invalid_import_data", "В экспорте отсутствуют обязательные коллекции")
+        if len(projects) > 1_000 or len(tasks) > 10_000 or len(checklist_items) > 50_000:
+            raise ApiError(422, "import_limit_exceeded", "Экспорт превышает допустимое число записей")
+        timestamp = now_iso()
+        project_ids: dict[str, str] = {}
+        task_ids: dict[str, str] = {}
+        clean_projects: list[dict[str, Any]] = []
+        clean_tasks: list[dict[str, Any]] = []
+        clean_checklist: list[dict[str, Any]] = []
+        for source in projects:
+            if not isinstance(source, dict) or not isinstance(source.get("id"), str) or not source["id"] or len(source["id"]) > 128 or source["id"] in project_ids:
+                raise ApiError(422, "invalid_import_data", "Некорректный или повторяющийся идентификатор проекта")
+            clean = self.validate_project(source)
+            archived_at = source.get("archived_at")
+            if archived_at is not None:
+                try:
+                    archived_date = datetime.fromisoformat(str(archived_at).replace("Z", "+00:00"))
+                    if archived_date.tzinfo is None:
+                        raise ValueError
+                except (ValueError, TypeError) as exc:
+                    raise ApiError(422, "invalid_import_data", "Некорректная дата архивации проекта") from exc
+            new_id = str(uuid.uuid4())
+            project_ids[source["id"]] = new_id
+            clean_projects.append({"id": new_id, "owner_id": user_id, **clean, "created_at": timestamp, "updated_at": timestamp, "version": 1, "deleted_at": None, "archived_at": timestamp if archived_at else None})
+        for source in tasks:
+            if not isinstance(source, dict) or not isinstance(source.get("id"), str) or not source["id"] or len(source["id"]) > 128 or source["id"] in task_ids:
+                raise ApiError(422, "invalid_import_data", "Некорректный или повторяющийся идентификатор задачи")
+            clean = validate_task(source)
+            old_project_id = clean.get("project_id")
+            if old_project_id is not None and not isinstance(old_project_id, str):
+                raise ApiError(422, "invalid_import_reference", "Некорректная ссылка задачи на проект")
+            if old_project_id is not None and old_project_id not in project_ids:
+                raise ApiError(422, "invalid_import_reference", "Задача ссылается на отсутствующий проект")
+            new_id = str(uuid.uuid4())
+            task_ids[source["id"]] = new_id
+            clean_tasks.append({"id": new_id, "owner_id": user_id, "project_id": project_ids.get(old_project_id), "title": clean["title"], "description": clean.get("description", ""), "status": clean.get("status", "inbox"), "priority": clean.get("priority", "normal"), "scheduled_date": clean.get("scheduled_date"), "due_at": clean.get("due_at"), "estimated_minutes": clean.get("estimated_minutes"), "created_at": timestamp, "updated_at": timestamp, "version": 1, "deleted_at": None})
+        seen_checklist_ids: set[str] = set()
+        for source in checklist_items:
+            if not isinstance(source, dict) or not isinstance(source.get("id"), str) or not source["id"] or len(source["id"]) > 128 or source["id"] in seen_checklist_ids:
+                raise ApiError(422, "invalid_import_data", "Некорректный или повторяющийся идентификатор подзадачи")
+            seen_checklist_ids.add(source["id"])
+            if not isinstance(source.get("task_id"), str) or source.get("task_id") not in task_ids:
+                raise ApiError(422, "invalid_import_reference", "Подзадача ссылается на отсутствующую задачу")
+            clean = self.validate_checklist_item(source)
+            clean_checklist.append({"id": str(uuid.uuid4()), "owner_id": user_id, "task_id": task_ids[source["task_id"]], "title": clean["title"], "is_done": clean.get("is_done", 0), "position": clean.get("position", 0), "created_at": timestamp, "updated_at": timestamp, "version": 1, "deleted_at": None})
+        with connect() as db:
+            db.executemany("INSERT INTO projects(id,owner_id,name,color,created_at,updated_at,version,deleted_at,archived_at) VALUES (:id,:owner_id,:name,:color,:created_at,:updated_at,:version,:deleted_at,:archived_at)", clean_projects)
+            db.executemany("INSERT INTO tasks(id,owner_id,project_id,title,description,status,priority,scheduled_date,due_at,estimated_minutes,created_at,updated_at,version,deleted_at) VALUES (:id,:owner_id,:project_id,:title,:description,:status,:priority,:scheduled_date,:due_at,:estimated_minutes,:created_at,:updated_at,:version,:deleted_at)", clean_tasks)
+            db.executemany("INSERT INTO checklist_items(id,owner_id,task_id,title,is_done,position,created_at,updated_at,version,deleted_at) VALUES (:id,:owner_id,:task_id,:title,:is_done,:position,:created_at,:updated_at,:version,:deleted_at)", clean_checklist)
+        return self.json_response(201, {"imported": {"projects": len(clean_projects), "tasks": len(clean_tasks), "checklist_items": len(clean_checklist)}})
 
     def delete_project(self, user_id: str, project_id: str):
         timestamp = now_iso()
@@ -604,6 +806,8 @@ class Application:
         timestamp = now_iso()
         with connect() as db:
             result = db.execute("UPDATE tasks SET deleted_at=?,updated_at=?,version=version+1 WHERE id=? AND owner_id=? AND deleted_at IS NULL", (timestamp, timestamp, task_id, user_id))
+            if result.rowcount:
+                db.execute("UPDATE checklist_items SET deleted_at=?,updated_at=?,version=version+1 WHERE task_id=? AND owner_id=? AND deleted_at IS NULL", (timestamp, timestamp, task_id, user_id))
         if not result.rowcount:
             raise ApiError(404, "not_found", "Задача не найдена")
         return self.json_response(200, {"deleted": True, "id": task_id, "updated_at": timestamp})

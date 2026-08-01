@@ -1,0 +1,218 @@
+{
+  "openapi": "3.1.0",
+    "info": {
+        "title": "TaskFlow API",
+        "version": "0.0.1",
+        "description": "Versioned API used by the TaskFlow web client and future offline-first Android client.",
+        "license": {
+            "name": "GNU Affero General Public License v3.0 only",
+            "identifier": "AGPL-3.0-only"
+        }
+    },
+  "servers": [{ "url": "/api/v1" }],
+  "tags": [
+    { "name": "Auth" },
+    { "name": "Tasks" },
+    { "name": "Projects" },
+    { "name": "Sync" }
+  ],
+  "paths": {
+    "/auth/register": {
+      "post": {
+        "tags": ["Auth"],
+        "security": [],
+        "summary": "Register a local user",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterRequest" } } } },
+        "responses": {
+          "201": { "description": "Verification email sent", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegistrationResponse" } } } },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "security": [],
+        "summary": "Create a bearer session",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+        "responses": {
+          "200": { "description": "Authenticated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/auth/verify-email": {
+      "post": {
+        "tags": ["Auth"],
+        "security": [],
+        "summary": "Verify a one-time email token and create a bearer session",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerifyEmailRequest" } } } },
+        "responses": {
+          "200": { "description": "Verified", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthResponse" } } } },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/auth/resend-verification": {
+      "post": {
+        "tags": ["Auth"],
+        "security": [],
+        "summary": "Request another verification email without revealing account existence",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "email": { "type": "string", "format": "email" } }, "required": ["email"] } } } },
+        "responses": {
+          "202": { "description": "Generic accepted response", "content": { "application/json": { "schema": { "type": "object", "properties": { "sent": { "type": "boolean" }, "message": { "type": "string" } }, "required": ["sent", "message"] } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/me": {
+      "get": {
+        "summary": "Get current user",
+        "responses": {
+          "200": { "description": "Profile", "content": { "application/json": { "schema": { "type": "object", "properties": { "user": { "$ref": "#/components/schemas/User" } }, "required": ["user"] } } } },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "tags": ["Projects"],
+        "summary": "List active projects",
+        "responses": { "200": { "description": "Projects", "content": { "application/json": { "schema": { "type": "object", "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "required": ["projects"] } } } } }
+      },
+      "post": {
+        "tags": ["Projects"],
+        "summary": "Create a project",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectWrite" } } } },
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "type": "object", "properties": { "project": { "$ref": "#/components/schemas/Project" } }, "required": ["project"] } } } },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/projects/{projectId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectId" }],
+      "patch": {
+        "tags": ["Projects"],
+        "summary": "Update a project using optimistic locking",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/ProjectWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] } } } },
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": { "type": "object", "properties": { "project": { "$ref": "#/components/schemas/Project" } } } } } },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "tags": ["Projects"],
+        "summary": "Soft-delete a project and detach its tasks",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Deleted" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/tasks": {
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "List active tasks",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "$ref": "#/components/schemas/TaskStatus" } },
+          { "name": "project_id", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "scheduled_date", "in": "query", "schema": { "type": "string", "format": "date" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } },
+                  "required": ["tasks"]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Create a task",
+        "parameters": [{ "name": "X-Client-ID", "in": "header", "description": "Client-generated UUID for offline creation", "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskCreate" } } } },
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "type": "object", "properties": { "task": { "$ref": "#/components/schemas/Task" } }, "required": ["task"] } } } },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/tasks/{taskId}": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskId" }],
+      "patch": {
+        "tags": ["Tasks"],
+        "summary": "Update a task using optimistic locking",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskUpdate" } } } },
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": { "type": "object", "properties": { "task": { "$ref": "#/components/schemas/Task" } } } } } },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "tags": ["Tasks"],
+        "summary": "Soft-delete a task",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Deleted" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/sync": {
+      "get": {
+        "tags": ["Sync"],
+        "summary": "Get changes after a cursor, including tombstones",
+        "parameters": [{ "name": "since", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time", "default": "1970-01-01T00:00:00.000Z" } }],
+        "responses": {
+          "200": { "description": "Changes", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncResponse" } } } },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
+    "parameters": {
+      "TaskId": { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "ProjectId": { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+    },
+    "responses": {
+      "Error": { "description": "API error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Deleted": { "description": "Soft-deleted", "content": { "application/json": { "schema": { "type": "object", "properties": { "deleted": { "const": true }, "id": { "type": "string", "format": "uuid" }, "updated_at": { "type": "string", "format": "date-time" } }, "required": ["deleted", "id", "updated_at"] } } } }
+    },
+    "schemas": {
+      "RegisterRequest": { "type": "object", "additionalProperties": false, "properties": { "email": { "type": "string", "format": "email" }, "display_name": { "type": "string", "minLength": 1, "maxLength": 80 }, "password": { "type": "string", "minLength": 8 } }, "required": ["email", "display_name", "password"] },
+      "LoginRequest": { "type": "object", "additionalProperties": false, "properties": { "email": { "type": "string", "format": "email" }, "password": { "type": "string" } }, "required": ["email", "password"] },
+      "VerifyEmailRequest": { "type": "object", "additionalProperties": false, "properties": { "token": { "type": "string", "minLength": 32 } }, "required": ["token"] },
+      "RegistrationResponse": { "type": "object", "properties": { "verification_required": { "const": true }, "email": { "type": "string", "format": "email" } }, "required": ["verification_required", "email"] },
+      "AuthResponse": { "type": "object", "properties": { "token": { "type": "string" }, "user": { "$ref": "#/components/schemas/User" } }, "required": ["token", "user"] },
+      "User": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "email": { "type": "string", "format": "email" }, "display_name": { "type": "string" }, "created_at": { "type": "string", "format": "date-time" }, "email_verified_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "email", "display_name"] },
+      "TaskStatus": { "type": "string", "enum": ["inbox", "todo", "in_progress", "done"] },
+      "TaskPriority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
+      "TaskWrite": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 240 }, "description": { "type": "string" }, "status": { "$ref": "#/components/schemas/TaskStatus" }, "priority": { "$ref": "#/components/schemas/TaskPriority" }, "scheduled_date": { "type": ["string", "null"], "format": "date" }, "due_at": { "type": ["string", "null"], "format": "date-time" }, "estimated_minutes": { "type": ["integer", "null"], "minimum": 1, "maximum": 10080 }, "project_id": { "type": ["string", "null"], "format": "uuid" } } },
+      "TaskCreate": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "required": ["title"] }] },
+      "TaskUpdate": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
+      "Task": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "title", "status", "priority", "created_at", "updated_at", "version"] }] },
+      "ProjectWrite": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "default": "#6d5dfc" } } },
+      "Project": { "allOf": [{ "$ref": "#/components/schemas/ProjectWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "name", "color", "created_at", "updated_at", "version"] }] },
+      "VersionGuard": { "type": "object", "properties": { "expected_version": { "type": "integer", "minimum": 1 } } },
+      "SyncResponse": { "type": "object", "properties": { "cursor": { "type": "string", "format": "date-time" }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } }, "required": ["cursor", "tasks", "projects"] },
+      "Error": { "type": "object", "properties": { "error": { "type": "object", "properties": { "code": { "type": "string" }, "message": { "type": "string" } }, "required": ["code", "message"] } }, "required": ["error"] }
+    }
+  }
+}

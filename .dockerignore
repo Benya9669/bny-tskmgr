@@ -1,0 +1,11 @@
+.git
+.github
+.env
+AGENTS.md
+data
+tests
+__pycache__
+*.pyc
+README.md
+web/designs.html
+web/designs.css

@@ -1,0 +1,10 @@
+data/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+# Local agent instructions are intentionally workstation-specific.
+AGENTS.md
+# Local interactive design previews (not part of the product/release).
+web/designs.html
+web/designs.css

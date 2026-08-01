@@ -1,0 +1,24 @@
+services:
+  taskflow:
+    build: .
+    container_name: taskflow
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TASKFLOW_SECRET: ${TASKFLOW_SECRET:?Set TASKFLOW_SECRET in .env}
+      TASKFLOW_TOKEN_TTL_DAYS: ${TASKFLOW_TOKEN_TTL_DAYS:-30}
+      TASKFLOW_PUBLIC_URL: ${TASKFLOW_PUBLIC_URL:?Set TASKFLOW_PUBLIC_URL in .env}
+      TASKFLOW_SMTP_HOST: ${TASKFLOW_SMTP_HOST:?Set TASKFLOW_SMTP_HOST in .env}
+      TASKFLOW_SMTP_PORT: ${TASKFLOW_SMTP_PORT:-587}
+      TASKFLOW_SMTP_MODE: ${TASKFLOW_SMTP_MODE:-starttls}
+      TASKFLOW_SMTP_USERNAME: ${TASKFLOW_SMTP_USERNAME:-}
+      TASKFLOW_SMTP_PASSWORD: ${TASKFLOW_SMTP_PASSWORD:-}
+      TASKFLOW_SMTP_FROM: ${TASKFLOW_SMTP_FROM:?Set TASKFLOW_SMTP_FROM in .env}
+      TASKFLOW_VERIFICATION_TTL_HOURS: ${TASKFLOW_VERIFICATION_TTL_HOURS:-24}
+      TASKFLOW_ALLOWED_ORIGIN: ${TASKFLOW_ALLOWED_ORIGIN:-}
+    volumes:
+      - taskflow_data:/data
+
+volumes:
+  taskflow_data:

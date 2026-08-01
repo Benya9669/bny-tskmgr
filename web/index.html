@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f3ee">
+  <title>TaskFlow — ваш спокойный планер</title>
+  <script>
+    (() => {
+      const saved = localStorage.getItem('taskflow_theme');
+      document.documentElement.dataset.theme = saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    })();
+  </script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <section class="auth" id="authView">
+    <div class="auth-copy">
+      <a class="brand" href="#"><span>TF</span> TaskFlow</a>
+      <div>
+        <p class="eyebrow">SELF-HOSTED · ВАШИ ДАННЫЕ</p>
+        <h1>Планы обретают<br><em>ясность.</em></h1>
+        <p class="lead">Задачи, расписание и фокус на сегодня — в одном спокойном пространстве.</p>
+      </div>
+      <p class="fine">Работает на вашем сервере. Готов к синхронизации с Android.</p>
+    </div>
+    <div class="auth-panel">
+      <button class="theme-toggle auth-theme" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button>
+      <form id="authForm" class="auth-card">
+        <p class="eyebrow" id="authEyebrow">С ВОЗВРАЩЕНИЕМ</p>
+        <h2 id="authTitle">Войти в TaskFlow</h2>
+        <label id="nameField" hidden>Ваше имя<input name="display_name" autocomplete="name" placeholder="Алексей"></label>
+        <label>Email<input name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label>
+        <label>Пароль<input name="password" type="password" minlength="8" autocomplete="current-password" placeholder="Минимум 8 символов" required></label>
+        <p class="form-error" id="authError"></p>
+        <p class="form-success" id="authSuccess"></p>
+        <button class="primary" type="submit" id="authSubmit">Войти</button>
+        <button class="link-button" type="button" id="resendVerification" hidden>Отправить письмо ещё раз</button>
+        <button class="link-button" type="button" id="authToggle">Нет аккаунта? Создать</button>
+      </form>
+    </div>
+  </section>
+
+  <div class="app" id="appView" hidden>
+    <aside class="sidebar">
+      <div>
+        <a class="brand" href="#"><span>TF</span> TaskFlow</a>
+        <nav>
+          <button class="nav-item active" data-filter="today"><span>◷</span> Сегодня <b id="todayCount">0</b></button>
+          <button class="nav-item" data-filter="inbox"><span>⌁</span> Входящие <b id="inboxCount">0</b></button>
+          <button class="nav-item" data-view="board"><span>▦</span> Доска</button>
+          <button class="nav-item" data-filter="all"><span>☷</span> Все задачи</button>
+          <button class="nav-item" data-filter="done"><span>✓</span> Выполненные</button>
+        </nav>
+        <div class="projects-head"><p>ПРОЕКТЫ</p><button id="newProject" aria-label="Новый проект">+</button></div>
+        <div id="projectList" class="project-list"></div>
+      </div>
+      <button class="profile" id="logout"><span id="avatar">?</span><span><strong id="userName">Пользователь</strong><small id="profileMeta">Выйти</small></span></button>
+    </aside>
+
+    <main>
+      <header class="mobile-head"><a class="brand" href="#"><span>TF</span> TaskFlow</a><div><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button id="mobileLogout">Выйти</button></div></header>
+      <div class="mobile-projects" id="mobileProjectList" aria-label="Проекты"></div>
+      <div class="topbar">
+        <div><p class="eyebrow" id="viewEyebrow">ВАШ ДЕНЬ</p><h1 id="viewTitle">Сегодня</h1><p id="dateLabel"></p></div>
+        <div class="top-actions"><div class="view-switcher" aria-label="Представление задач"><button class="active" type="button" data-task-view="list">☷ <span>Список</span></button><button type="button" data-task-view="board">▦ <span>Доска</span></button></div><button class="theme-toggle" data-theme-toggle aria-label="Переключить тему"><span aria-hidden="true">☾</span></button><button class="primary add-button" id="addTask">＋ Новая задача</button></div>
+      </div>
+      <section class="progress-card">
+        <div><p>Дневной прогресс</p><strong id="progressText">0 из 0 задач</strong></div>
+        <div class="progress"><i id="progressBar"></i></div><span id="progressPercent">0%</span>
+      </section>
+      <section class="task-section">
+        <div class="section-head"><h2 id="listTitle">План на сегодня</h2><div class="segmented"><button class="active" data-sort="priority">Приоритет</button><button data-sort="created">Новые</button></div></div>
+        <div id="taskList" class="task-list"></div>
+        <div id="emptyState" class="empty" hidden><div>✓</div><h3>Здесь пока тихо</h3><p>Добавьте первую задачу — небольшой шаг уже считается.</p></div>
+      </section>
+      <section class="board-section" id="boardSection" aria-label="Канбан-доска" hidden>
+        <div class="kanban" id="kanbanBoard"></div>
+      </section>
+    </main>
+    <nav class="mobile-tabs" aria-label="Основная навигация">
+      <button class="mobile-nav-item active" data-filter="today"><span>◷</span>Сегодня</button>
+      <button class="mobile-nav-item" data-filter="inbox"><span>⌁</span>Входящие</button>
+      <button class="mobile-nav-item" data-view="board"><span>▦</span>Доска</button>
+      <button class="mobile-nav-item" data-filter="all"><span>☷</span>Все</button>
+      <button class="mobile-nav-item" data-filter="done"><span>✓</span>Готово</button>
+    </nav>
+  </div>
+
+  <dialog id="taskDialog">
+    <form id="taskForm" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">ЗАДАЧА</p><h2 id="dialogTitle">Новая задача</h2></div><button type="button" class="close" data-close>×</button></div>
+      <input type="hidden" name="id">
+      <label>Название<input name="title" maxlength="240" placeholder="Что нужно сделать?" required autofocus></label>
+      <label>Описание<textarea name="description" rows="3" placeholder="Детали, заметки, ссылки…"></textarea></label>
+      <div class="form-grid">
+        <label>Дата<input name="scheduled_date" type="date"></label>
+        <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="urgent">Срочный</option><option value="low">Низкий</option></select></label>
+        <label>Статус<select name="status"><option value="inbox">Входящие</option><option value="todo">Запланировано</option><option value="in_progress">В работе</option><option value="done">Выполнено</option></select></label>
+        <label>Проект<select name="project_id" id="projectSelect"><option value="">Без проекта</option></select></label>
+        <label>Оценка, мин<input name="estimated_minutes" type="number" min="1" max="10080" placeholder="30"></label>
+      </div>
+      <p class="form-error" id="taskError"></p>
+      <div class="dialog-actions"><button class="secondary" type="button" data-close>Отмена</button><button class="primary" type="submit">Сохранить</button></div>
+    </form>
+  </dialog>
+  <dialog id="projectDialog">
+    <form id="projectForm" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">ПРОЕКТ</p><h2 id="projectDialogTitle">Новый проект</h2></div><button type="button" class="close" data-project-close>×</button></div>
+      <input type="hidden" name="id">
+      <label>Название<input name="name" maxlength="100" placeholder="Например, Запуск продукта" required></label>
+      <label>Цвет<input name="color" type="color" value="#6d5dfc"></label>
+      <p class="form-error" id="projectError"></p>
+      <div class="dialog-actions"><button class="danger" id="deleteProject" type="button" hidden>Удалить</button><span class="dialog-spacer"></span><button class="secondary" type="button" data-project-close>Отмена</button><button class="primary" type="submit">Сохранить</button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

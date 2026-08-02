@@ -9,3 +9,5 @@ AGENTS.md
 # Local interactive design previews (not part of the product/release).
 web/designs.html
 web/designs.css
+# Local handoff summary of the product conversation and development decisions.
+PROJECT_CONTEXT.md

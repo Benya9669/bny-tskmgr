@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
     "info": {
         "title": "TaskFlow API",
-        "version": "0.0.2",
+        "version": "0.1.0-dev",
         "description": "Versioned API used by the TaskFlow web client and future offline-first Android client.",
         "license": {
             "name": "GNU Affero General Public License v3.0 only",
@@ -14,7 +14,10 @@
     { "name": "Auth" },
     { "name": "Tasks" },
     { "name": "Checklists" },
+    { "name": "Discussions" },
+    { "name": "Notes" },
     { "name": "Projects" },
+    { "name": "Kanban" },
     { "name": "Data" },
     { "name": "Sync" }
   ],
@@ -70,6 +73,27 @@
         }
       }
     },
+    "/auth/request-password-reset": {
+      "post": {
+        "tags": ["Auth"], "security": [], "summary": "Request a password reset without revealing account existence",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "email": { "type": "string", "format": "email" } }, "required": ["email"] } } } },
+        "responses": { "202": { "description": "Generic accepted response", "content": { "application/json": { "schema": { "type": "object", "properties": { "sent": { "type": "boolean" }, "message": { "type": "string" } }, "required": ["sent", "message"] } } } } }
+      }
+    },
+    "/auth/reset-password": {
+      "post": {
+        "tags": ["Auth"], "security": [], "summary": "Set a password with a one-time reset token",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "token": { "type": "string" }, "new_password": { "type": "string", "minLength": 8 } }, "required": ["token", "new_password"] } } } },
+        "responses": { "200": { "description": "Password reset" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/auth/confirm-email-change": {
+      "post": {
+        "tags": ["Auth"], "security": [], "summary": "Confirm a pending email change with a one-time token",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerifyEmailRequest" } } } },
+        "responses": { "200": { "description": "Email updated", "content": { "application/json": { "schema": { "type": "object", "properties": { "user": { "$ref": "#/components/schemas/User" } }, "required": ["user"] } } } }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/me": {
       "get": {
         "summary": "Get current user",
@@ -77,6 +101,13 @@
           "200": { "description": "Profile", "content": { "application/json": { "schema": { "type": "object", "properties": { "user": { "$ref": "#/components/schemas/User" } }, "required": ["user"] } } } },
           "401": { "$ref": "#/components/responses/Error" }
         }
+      }
+    },
+    "/account": {
+      "patch": {
+        "tags": ["Auth"], "summary": "Update account profile, password, or request an email change",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "display_name": { "type": "string", "maxLength": 80 }, "current_password": { "type": "string" }, "new_password": { "type": "string", "minLength": 8 }, "email": { "type": "string", "format": "email" } } } } } },
+        "responses": { "200": { "description": "Account updated", "content": { "application/json": { "schema": { "type": "object", "properties": { "user": { "$ref": "#/components/schemas/User" }, "email_change_pending": { "type": "string", "format": "email" } }, "required": ["user"] } } } }, "403": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/projects": {
@@ -147,6 +178,50 @@
         "responses": { "201": { "description": "Imported counts" }, "413": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
       }
     },
+    "/data/import/yougile": {
+      "post": {
+        "tags": ["Data"],
+        "summary": "Atomically import a YouGile JSON project export",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/YouGileExport" } } } },
+        "responses": { "201": { "description": "Imported projects, columns, tasks and checklist counts" }, "413": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/kanban/columns": {
+      "get": {
+        "tags": ["Kanban"],
+        "summary": "List active custom kanban columns",
+        "responses": { "200": { "description": "Ordered kanban columns" } }
+      },
+      "post": {
+        "tags": ["Kanban"],
+        "summary": "Create a custom kanban column",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KanbanColumnCreate" } } } },
+        "responses": { "201": { "description": "Created column" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/kanban/columns/reorder": {
+      "post": {
+        "tags": ["Kanban"],
+        "summary": "Atomically replace the active column order",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "column_ids": { "type": "array", "items": { "type": "string", "format": "uuid" }, "minItems": 1, "uniqueItems": true } }, "required": ["column_ids"] } } } },
+        "responses": { "200": { "description": "Reordered columns" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/kanban/columns/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "patch": {
+        "tags": ["Kanban"],
+        "summary": "Update a custom column and its task semantics",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KanbanColumnWrite" } } } },
+        "responses": { "200": { "description": "Updated column" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      },
+      "delete": {
+        "tags": ["Kanban"],
+        "summary": "Delete a column and atomically move its tasks",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "move_to_column_id": { "type": "string", "format": "uuid" }, "expected_version": { "type": "integer", "minimum": 1 } }, "required": ["move_to_column_id"] } } } },
+        "responses": { "200": { "description": "Deleted column and destination" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/tasks": {
       "get": {
         "tags": ["Tasks"],
@@ -154,7 +229,9 @@
         "parameters": [
           { "name": "status", "in": "query", "schema": { "$ref": "#/components/schemas/TaskStatus" } },
           { "name": "project_id", "in": "query", "schema": { "type": "string", "format": "uuid" } },
-          { "name": "scheduled_date", "in": "query", "schema": { "type": "string", "format": "date" } }
+          { "name": "scheduled_date", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "scheduled_from", "in": "query", "description": "Inclusive planning range start", "schema": { "type": "string", "format": "date" } },
+          { "name": "scheduled_to", "in": "query", "description": "Inclusive planning range end", "schema": { "type": "string", "format": "date" } }
         ],
         "responses": {
           "200": {
@@ -205,6 +282,31 @@
         }
       }
     },
+    "/tasks/{taskId}/move": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskId" }],
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Atomically move or reorder a kanban card",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskMove" } } } },
+        "responses": {
+          "200": { "description": "Moved task and tasks renumbered during a rare rebalance", "content": { "application/json": { "schema": { "type": "object", "properties": { "task": { "$ref": "#/components/schemas/Task" }, "affected_tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } }, "required": ["task", "affected_tasks"] } } } },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/tasks/{taskId}/history": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskId" }],
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "List immutable history for an owned task",
+        "responses": {
+          "200": { "description": "Task history", "content": { "application/json": { "schema": { "type": "object", "properties": { "history": { "type": "array", "items": { "$ref": "#/components/schemas/TaskHistoryEntry" } } }, "required": ["history"] } } } },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/checklist": {
       "get": {
         "tags": ["Checklists"],
@@ -249,6 +351,64 @@
         "responses": { "200": { "$ref": "#/components/responses/Deleted" }, "404": { "$ref": "#/components/responses/Error" } }
       }
     },
+    "/messages": {
+      "get": {
+        "tags": ["Discussions"],
+        "summary": "List active messages for an owned task",
+        "parameters": [{ "name": "task_id", "in": "query", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Task discussion", "content": { "application/json": { "schema": { "type": "object", "properties": { "messages": { "type": "array", "items": { "$ref": "#/components/schemas/TaskMessage" } } }, "required": ["messages"] } } } }, "404": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/tasks/{taskId}/messages": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskId" }],
+      "post": {
+        "tags": ["Discussions"],
+        "summary": "Add a message to a task discussion",
+        "parameters": [{ "name": "X-Client-ID", "in": "header", "description": "Client-generated UUID for offline creation", "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskMessageCreate" } } } },
+        "responses": { "201": { "description": "Created message" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/messages/{messageId}": {
+      "parameters": [{ "$ref": "#/components/parameters/MessageId" }],
+      "patch": {
+        "tags": ["Discussions"],
+        "summary": "Edit a user message using optimistic locking",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskMessageUpdate" } } } },
+        "responses": { "200": { "description": "Updated message" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } }
+      },
+      "delete": {
+        "tags": ["Discussions"],
+        "summary": "Soft-delete a message",
+        "responses": { "200": { "$ref": "#/components/responses/Deleted" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/note-folders": {
+      "get": { "tags": ["Notes"], "summary": "List note folders", "responses": { "200": { "description": "Ordered active folders" } } },
+      "post": { "tags": ["Notes"], "summary": "Create a note folder", "parameters": [{ "name": "X-Client-ID", "in": "header", "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoteFolderCreate" } } } }, "responses": { "201": { "description": "Created folder" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/note-folders/{folderId}": {
+      "parameters": [{ "$ref": "#/components/parameters/NoteFolderId" }],
+      "patch": { "tags": ["Notes"], "summary": "Update a note folder using optimistic locking", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoteFolderUpdate" } } } }, "responses": { "200": { "description": "Updated folder" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } } },
+      "delete": { "tags": ["Notes"], "summary": "Soft-delete a folder and detach its notes", "responses": { "200": { "$ref": "#/components/responses/Deleted" }, "404": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/notes": {
+      "get": { "tags": ["Notes"], "summary": "List and search active notes", "parameters": [{ "name": "folder_id", "in": "query", "schema": { "type": "string" } }, { "name": "favorite", "in": "query", "schema": { "type": "boolean" } }, { "name": "q", "in": "query", "description": "Full-text query over title and content", "schema": { "type": "string", "maxLength": 200 } }, { "name": "task_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }, { "name": "project_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "Notes ordered by favorite and update time" }, "422": { "$ref": "#/components/responses/Error" } } },
+      "post": { "tags": ["Notes"], "summary": "Create a Markdown note", "parameters": [{ "name": "X-Client-ID", "in": "header", "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoteCreate" } } } }, "responses": { "201": { "description": "Created note" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/notes/{noteId}": {
+      "parameters": [{ "$ref": "#/components/parameters/NoteId" }],
+      "patch": { "tags": ["Notes"], "summary": "Autosave note fields using optimistic locking", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoteUpdate" } } } }, "responses": { "200": { "description": "Saved note" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } } },
+      "delete": { "tags": ["Notes"], "summary": "Soft-delete a note", "responses": { "200": { "$ref": "#/components/responses/Deleted" }, "404": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/note-links": {
+      "get": { "tags": ["Notes"], "summary": "List active links between notes and tasks or projects", "parameters": [{ "name": "note_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }, { "name": "task_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }, { "name": "project_id", "in": "query", "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "Active note links" } } },
+      "post": { "tags": ["Notes"], "summary": "Link a note to one task or project", "parameters": [{ "name": "X-Client-ID", "in": "header", "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoteLinkCreate" } } } }, "responses": { "201": { "description": "Created note link" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/note-links/{noteLinkId}": {
+      "parameters": [{ "$ref": "#/components/parameters/NoteLinkId" }],
+      "delete": { "tags": ["Notes"], "summary": "Soft-delete a note link", "responses": { "200": { "$ref": "#/components/responses/Deleted" }, "404": { "$ref": "#/components/responses/Error" } } }
+    },
     "/sync": {
       "get": {
         "tags": ["Sync"],
@@ -267,6 +427,10 @@
     "parameters": {
       "TaskId": { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "ChecklistItemId": { "name": "checklistItemId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "MessageId": { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "NoteFolderId": { "name": "folderId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "NoteId": { "name": "noteId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "NoteLinkId": { "name": "noteLinkId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "ProjectId": { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
     },
     "responses": {
@@ -282,22 +446,46 @@
       "User": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "email": { "type": "string", "format": "email" }, "display_name": { "type": "string" }, "created_at": { "type": "string", "format": "date-time" }, "email_verified_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "email", "display_name"] },
       "TaskStatus": { "type": "string", "enum": ["inbox", "todo", "in_progress", "done"] },
       "TaskPriority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
-      "TaskWrite": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 240 }, "description": { "type": "string" }, "status": { "$ref": "#/components/schemas/TaskStatus" }, "priority": { "$ref": "#/components/schemas/TaskPriority" }, "scheduled_date": { "type": ["string", "null"], "format": "date" }, "due_at": { "type": ["string", "null"], "format": "date-time" }, "estimated_minutes": { "type": ["integer", "null"], "minimum": 1, "maximum": 10080 }, "project_id": { "type": ["string", "null"], "format": "uuid" } } },
+      "TaskWrite": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 240 }, "description": { "type": "string" }, "status": { "$ref": "#/components/schemas/TaskStatus" }, "priority": { "$ref": "#/components/schemas/TaskPriority" }, "scheduled_date": { "type": ["string", "null"], "format": "date" }, "due_at": { "type": ["string", "null"], "format": "date-time" }, "estimated_minutes": { "type": ["integer", "null"], "minimum": 1, "maximum": 10080 }, "project_id": { "type": ["string", "null"], "format": "uuid" }, "column_id": { "type": "string", "format": "uuid" }, "recurrence": { "type": ["string", "null"], "enum": ["daily", "weekly", "monthly", null] }, "reminder_offsets": { "type": "array", "items": { "type": "integer", "enum": [0, 15, 60, 1440] }, "uniqueItems": true }, "tags": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 40 }, "maxItems": 20, "uniqueItems": true } } },
       "TaskCreate": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "required": ["title"] }] },
       "TaskUpdate": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
-      "Task": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "title", "status", "priority", "created_at", "updated_at", "version"] }] },
+      "Task": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "kanban_position": { "type": "integer", "minimum": 0 }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "column_id", "title", "status", "priority", "kanban_position", "created_at", "updated_at", "version"] }] },
+      "TaskHistoryEntry": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "task_id": { "type": "string", "format": "uuid" }, "event_type": { "type": "string", "enum": ["created", "updated", "moved", "deleted"] }, "changes": { "type": "object" }, "created_at": { "type": "string", "format": "date-time" } }, "required": ["id", "task_id", "event_type", "changes", "created_at"] },
+      "TaskMove": { "type": "object", "properties": { "column_id": { "type": "string", "format": "uuid" }, "before_task_id": { "type": ["string", "null"], "format": "uuid" }, "expected_version": { "type": "integer", "minimum": 1 } }, "required": ["column_id", "expected_version"] },
       "ChecklistItemWrite": { "type": "object", "additionalProperties": false, "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 240 }, "is_done": { "type": "boolean" }, "position": { "type": "integer", "minimum": 0, "maximum": 1000000 } } },
       "ChecklistItemCreate": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "type": "object", "required": ["title"] }] },
       "ChecklistItemUpdate": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
       "ChecklistItem": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "task_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "task_id", "title", "is_done", "position", "created_at", "updated_at", "version"] }] },
+      "TaskMessageCreate": { "type": "object", "additionalProperties": false, "properties": { "body": { "type": "string", "minLength": 1, "maxLength": 5000 } }, "required": ["body"] },
+      "TaskMessageUpdate": { "allOf": [{ "$ref": "#/components/schemas/TaskMessageCreate" }, { "$ref": "#/components/schemas/VersionGuard" }] },
+      "TaskMessage": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "task_id": { "type": "string", "format": "uuid" }, "author_id": { "type": "string", "format": "uuid" }, "author_name": { "type": "string" }, "body": { "type": "string", "minLength": 1, "maxLength": 5000 }, "kind": { "type": "string", "enum": ["comment", "system"] }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "edited_at": { "type": ["string", "null"], "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "task_id", "author_id", "body", "kind", "created_at", "updated_at", "version"] },
+      "NoteFolderWrite": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "position": { "type": "integer", "minimum": 0, "maximum": 1000000 } } },
+      "NoteFolderCreate": { "allOf": [{ "$ref": "#/components/schemas/NoteFolderWrite" }, { "type": "object", "required": ["name"] }] },
+      "NoteFolderUpdate": { "allOf": [{ "$ref": "#/components/schemas/NoteFolderWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
+      "NoteFolder": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "position": { "type": "integer" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "name", "position", "created_at", "updated_at", "version"] },
+      "NoteWrite": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 240 }, "content": { "type": "string", "maxLength": 200000 }, "folder_id": { "type": ["string", "null"], "format": "uuid" }, "is_favorite": { "type": "boolean" } } },
+      "NoteCreate": { "allOf": [{ "$ref": "#/components/schemas/NoteWrite" }, { "type": "object", "required": ["title"] }] },
+      "NoteUpdate": { "allOf": [{ "$ref": "#/components/schemas/NoteWrite" }, { "$ref": "#/components/schemas/VersionGuard" }] },
+      "Note": { "allOf": [{ "$ref": "#/components/schemas/NoteWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "title", "content", "is_favorite", "created_at", "updated_at", "version"] }] },
+      "NoteLinkCreate": { "type": "object", "additionalProperties": false, "properties": { "note_id": { "type": "string", "format": "uuid" }, "task_id": { "type": "string", "format": "uuid" }, "project_id": { "type": "string", "format": "uuid" } }, "required": ["note_id"], "oneOf": [{ "required": ["task_id"], "not": { "required": ["project_id"] } }, { "required": ["project_id"], "not": { "required": ["task_id"] } }] },
+      "NoteLink": { "allOf": [{ "$ref": "#/components/schemas/NoteLinkCreate" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "note_id", "created_at", "updated_at", "version"] }] },
       "ProjectWrite": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "default": "#6d5dfc" } } },
       "Project": { "allOf": [{ "$ref": "#/components/schemas/ProjectWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" }, "archived_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "name", "color", "created_at", "updated_at", "version"] }] },
+      "KanbanColumnWrite": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 80 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }, "semantic_status": { "$ref": "#/components/schemas/TaskStatus" }, "position": { "type": "integer", "minimum": 0, "maximum": 1000000 }, "expected_version": { "type": "integer", "minimum": 1 } } },
+      "KanbanColumnCreate": { "allOf": [{ "$ref": "#/components/schemas/KanbanColumnWrite" }, { "type": "object", "required": ["name", "color", "semantic_status"] }] },
+      "KanbanColumn": { "allOf": [{ "$ref": "#/components/schemas/KanbanColumnWrite" }, { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "owner_id": { "type": "string", "format": "uuid" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 }, "deleted_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "owner_id", "name", "color", "semantic_status", "position", "created_at", "updated_at", "version"] }] },
       "ExportProject": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "color": { "type": "string" }, "archived_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "name", "color"] },
+      "ExportKanbanColumn": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "color": { "type": "string" }, "semantic_status": { "$ref": "#/components/schemas/TaskStatus" }, "position": { "type": "integer", "minimum": 0 } }, "required": ["id", "name", "color", "semantic_status", "position"] },
       "ExportTask": { "allOf": [{ "$ref": "#/components/schemas/TaskWrite" }, { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id", "title"] }] },
       "ExportChecklistItem": { "allOf": [{ "$ref": "#/components/schemas/ChecklistItemWrite" }, { "type": "object", "properties": { "id": { "type": "string" }, "task_id": { "type": "string" } }, "required": ["id", "task_id", "title"] }] },
-      "DataExport": { "type": "object", "properties": { "format": { "const": "taskflow-export" }, "version": { "const": 1 }, "exported_at": { "type": "string", "format": "date-time" }, "data": { "type": "object", "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/ExportProject" } }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/ExportTask" } }, "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ExportChecklistItem" } } }, "required": ["projects", "tasks", "checklist_items"] } }, "required": ["format", "version", "data"] },
+      "ExportTaskMessage": { "type": "object", "properties": { "id": { "type": "string" }, "task_id": { "type": "string" }, "body": { "type": "string", "minLength": 1, "maxLength": 5000 }, "kind": { "type": "string", "enum": ["comment", "system"] }, "created_at": { "type": "string", "format": "date-time" }, "edited_at": { "type": ["string", "null"], "format": "date-time" } }, "required": ["id", "task_id", "body", "kind", "created_at"] },
+      "ExportNoteFolder": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "position": { "type": "integer" } }, "required": ["id", "name", "position"] },
+      "ExportNote": { "type": "object", "properties": { "id": { "type": "string" }, "folder_id": { "type": ["string", "null"] }, "title": { "type": "string" }, "content": { "type": "string" }, "is_favorite": { "type": "boolean" }, "created_at": { "type": "string", "format": "date-time" } }, "required": ["id", "title", "content", "is_favorite"] },
+      "ExportNoteLink": { "type": "object", "properties": { "id": { "type": "string" }, "note_id": { "type": "string" }, "task_id": { "type": ["string", "null"] }, "project_id": { "type": ["string", "null"] } }, "required": ["id", "note_id"] },
+      "DataExport": { "type": "object", "properties": { "format": { "const": "taskflow-export" }, "version": { "const": 9 }, "exported_at": { "type": "string", "format": "date-time" }, "data": { "type": "object", "properties": { "projects": { "type": "array", "items": { "$ref": "#/components/schemas/ExportProject" } }, "kanban_columns": { "type": "array", "items": { "$ref": "#/components/schemas/ExportKanbanColumn" } }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/ExportTask" } }, "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ExportChecklistItem" } }, "task_messages": { "type": "array", "items": { "$ref": "#/components/schemas/ExportTaskMessage" } }, "note_folders": { "type": "array", "items": { "$ref": "#/components/schemas/ExportNoteFolder" } }, "notes": { "type": "array", "items": { "$ref": "#/components/schemas/ExportNote" } }, "note_links": { "type": "array", "items": { "$ref": "#/components/schemas/ExportNoteLink" } } }, "required": ["projects", "kanban_columns", "tasks", "checklist_items", "task_messages", "note_folders", "notes", "note_links"] } }, "required": ["format", "version", "data"] },
+      "YouGileExport": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 100 }, "boards": { "type": "array", "minItems": 1, "items": { "type": "object" } }, "tasks": { "type": "object", "additionalProperties": { "type": "object" } } }, "required": ["title", "boards", "tasks"] },
       "VersionGuard": { "type": "object", "properties": { "expected_version": { "type": "integer", "minimum": 1 } } },
-      "SyncResponse": { "type": "object", "properties": { "cursor": { "type": "string", "format": "date-time" }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } }, "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ChecklistItem" } } }, "required": ["cursor", "tasks", "projects", "checklist_items"] },
+      "SyncResponse": { "type": "object", "properties": { "cursor": { "type": "string", "format": "date-time" }, "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "projects": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } }, "kanban_columns": { "type": "array", "items": { "$ref": "#/components/schemas/KanbanColumn" } }, "checklist_items": { "type": "array", "items": { "$ref": "#/components/schemas/ChecklistItem" } }, "task_messages": { "type": "array", "items": { "$ref": "#/components/schemas/TaskMessage" } }, "note_folders": { "type": "array", "items": { "$ref": "#/components/schemas/NoteFolder" } }, "notes": { "type": "array", "items": { "$ref": "#/components/schemas/Note" } }, "note_links": { "type": "array", "items": { "$ref": "#/components/schemas/NoteLink" } } }, "required": ["cursor", "tasks", "projects", "kanban_columns", "checklist_items", "task_messages", "note_folders", "notes", "note_links"] },
       "Error": { "type": "object", "properties": { "error": { "type": "object", "properties": { "code": { "type": "string" }, "message": { "type": "string" } }, "required": ["code", "message"] } }, "required": ["error"] }
     }
   }

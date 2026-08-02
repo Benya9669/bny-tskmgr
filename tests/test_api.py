@@ -69,6 +69,35 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNotNone(sync["tasks"][0]["deleted_at"])
 
+    def test_password_reset_and_account_updates_are_secure(self):
+        sent = []
+        original_reset_sender = server.send_password_reset_email
+        original_change_sender = server.send_email_change_confirmation
+        server.send_password_reset_email = lambda email, name, token: sent.append(("reset", email, token))
+        server.send_email_change_confirmation = lambda email, name, token: sent.append(("email", email, token))
+        try:
+            anonymous = ApiClient()
+            status, response = anonymous.request("POST", "/api/v1/auth/request-password-reset", {"email": "missing@example.com"})
+            self.assertEqual((status, response["sent"]), (202, True))
+            status, _ = anonymous.request("POST", "/api/v1/auth/request-password-reset", {"email": "user@example.com"})
+            self.assertEqual(status, 202)
+            reset_token = sent[-1][2]
+            status, _ = anonymous.request("POST", "/api/v1/auth/reset-password", {"token": reset_token, "new_password": "new-correct-horse"})
+            self.assertEqual(status, 200)
+            status, login = anonymous.request("POST", "/api/v1/auth/login", {"email": "user@example.com", "password": "new-correct-horse"})
+            self.assertEqual(status, 200)
+            self.client.token = login["token"]
+            status, denied = self.client.request("PATCH", "/api/v1/account", {"new_password": "another-password"})
+            self.assertEqual((status, denied["error"]["code"]), (403, "invalid_current_password"))
+            status, updated = self.client.request("PATCH", "/api/v1/account", {"display_name": "Новое имя", "email": "new@example.com", "current_password": "new-correct-horse"})
+            self.assertEqual((status, updated["user"]["display_name"], updated["email_change_pending"]), (200, "Новое имя", "new@example.com"))
+            email_token = sent[-1][2]
+            status, confirmed = anonymous.request("POST", "/api/v1/auth/confirm-email-change", {"token": email_token})
+            self.assertEqual((status, confirmed["user"]["email"]), (200, "new@example.com"))
+        finally:
+            server.send_password_reset_email = original_reset_sender
+            server.send_email_change_confirmation = original_change_sender
+
     def test_checklist_lifecycle_sync_and_parent_delete(self):
         _, created = self.client.request("POST", "/api/v1/tasks", {"title": "Релиз"})
         task_id = created["task"]["id"]
@@ -118,6 +147,153 @@ class ApiTests(unittest.TestCase):
         status, listed = other.request("GET", "/api/v1/checklist")
         self.assertEqual((status, listed["checklist_items"]), (200, []))
 
+    def test_task_discussion_lifecycle_privacy_sync_and_parent_delete(self):
+        _, created = self.client.request("POST", "/api/v1/tasks", {"title": "Обсуждаемая задача"})
+        task_id = created["task"]["id"]
+        status, created_message = self.client.request("POST", f"/api/v1/tasks/{task_id}/messages", {"body": "Первое решение"})
+        self.assertEqual(status, 201)
+        message = created_message["message"]
+        self.assertEqual((message["kind"], message["version"], message["author_name"]), ("comment", 1, "Тест"))
+
+        status, listed = self.client.request("GET", f"/api/v1/messages?task_id={task_id}")
+        self.assertEqual((status, [item["body"] for item in listed["messages"]]), (200, ["Первое решение"]))
+        status, updated = self.client.request("PATCH", f"/api/v1/messages/{message['id']}", {"body": "Уточнённое решение", "expected_version": 1})
+        self.assertEqual((status, updated["message"]["version"], updated["message"]["body"]), (200, 2, "Уточнённое решение"))
+        self.assertIsNotNone(updated["message"]["edited_at"])
+        status, stale = self.client.request("PATCH", f"/api/v1/messages/{message['id']}", {"body": "Старая версия", "expected_version": 1})
+        self.assertEqual((status, stale["error"]["code"]), (409, "version_conflict"))
+
+        other = ApiClient()
+        registration = self.register_and_verify(other, "discussion-other@example.com", "Другой")
+        other.token = registration["token"]
+        status, _ = other.request("GET", f"/api/v1/messages?task_id={task_id}")
+        self.assertEqual(status, 404)
+        status, _ = other.request("PATCH", f"/api/v1/messages/{message['id']}", {"body": "Чужое", "expected_version": 2})
+        self.assertEqual(status, 404)
+
+        status, _ = self.client.request("DELETE", f"/api/v1/tasks/{task_id}")
+        self.assertEqual(status, 200)
+        _, sync = self.client.request("GET", "/api/v1/sync?since=1970-01-01T00:00:00.000Z")
+        synced = next(item for item in sync["task_messages"] if item["id"] == message["id"])
+        self.assertIsNotNone(synced["deleted_at"])
+
+    def test_discussion_message_can_be_soft_deleted(self):
+        _, created = self.client.request("POST", "/api/v1/tasks", {"title": "Удаление сообщения"})
+        task_id = created["task"]["id"]
+        _, created_message = self.client.request("POST", f"/api/v1/tasks/{task_id}/messages", {"body": "Временное"})
+        message_id = created_message["message"]["id"]
+        status, _ = self.client.request("DELETE", f"/api/v1/messages/{message_id}")
+        self.assertEqual(status, 200)
+        _, listed = self.client.request("GET", f"/api/v1/messages?task_id={task_id}")
+        self.assertEqual(listed["messages"], [])
+        _, sync = self.client.request("GET", "/api/v1/sync?since=1970-01-01T00:00:00.000Z")
+        synced = next(item for item in sync["task_messages"] if item["id"] == message_id)
+        self.assertIsNotNone(synced["deleted_at"])
+
+    def test_markdown_notes_folders_favorites_privacy_and_sync(self):
+        status, created_folder = self.client.request("POST", "/api/v1/note-folders", {"name": "Работа"})
+        self.assertEqual(status, 201)
+        folder = created_folder["folder"]
+        status, created_note = self.client.request("POST", "/api/v1/notes", {"title": "План", "content": "# Релиз\n\n- [ ] Проверить", "folder_id": folder["id"], "is_favorite": True})
+        self.assertEqual(status, 201)
+        note = created_note["note"]
+        self.assertEqual((note["is_favorite"], note["version"]), (True, 1))
+
+        status, listed = self.client.request("GET", f"/api/v1/notes?folder_id={folder['id']}&favorite=true")
+        self.assertEqual((status, [item["title"] for item in listed["notes"]]), (200, ["План"]))
+        status, updated = self.client.request("PATCH", f"/api/v1/notes/{note['id']}", {"content": "## Готово", "is_favorite": False, "expected_version": 1})
+        self.assertEqual((status, updated["note"]["content"], updated["note"]["version"]), (200, "## Готово", 2))
+        self.assertFalse(updated["note"]["is_favorite"])
+        status, stale = self.client.request("PATCH", f"/api/v1/notes/{note['id']}", {"title": "Старая", "expected_version": 1})
+        self.assertEqual((status, stale["error"]["code"]), (409, "version_conflict"))
+        status, invalid = self.client.request("POST", "/api/v1/notes", {"title": "Чужая папка", "folder_id": "missing"})
+        self.assertEqual((status, invalid["error"]["code"]), (422, "invalid_folder"))
+
+        other = ApiClient()
+        registration = self.register_and_verify(other, "notes-other@example.com", "Другой")
+        other.token = registration["token"]
+        status, _ = other.request("PATCH", f"/api/v1/notes/{note['id']}", {"title": "Чужое", "expected_version": 2})
+        self.assertEqual(status, 404)
+        status, _ = other.request("DELETE", f"/api/v1/note-folders/{folder['id']}")
+        self.assertEqual(status, 404)
+
+        status, _ = self.client.request("DELETE", f"/api/v1/note-folders/{folder['id']}")
+        self.assertEqual(status, 200)
+        _, notes = self.client.request("GET", "/api/v1/notes?folder_id=none")
+        detached = next(item for item in notes["notes"] if item["id"] == note["id"])
+        self.assertIsNone(detached["folder_id"])
+        status, _ = self.client.request("DELETE", f"/api/v1/notes/{note['id']}")
+        self.assertEqual(status, 200)
+        _, sync = self.client.request("GET", "/api/v1/sync?since=1970-01-01T00:00:00.000Z")
+        synced_folder = next(item for item in sync["note_folders"] if item["id"] == folder["id"])
+        synced_note = next(item for item in sync["notes"] if item["id"] == note["id"])
+        self.assertIsNotNone(synced_folder["deleted_at"])
+        self.assertIsNotNone(synced_note["deleted_at"])
+
+    def test_note_links_are_private_searchable_and_synced_as_tombstones(self):
+        _, project_data = self.client.request("POST", "/api/v1/projects", {"name": "Документация"})
+        _, task_data = self.client.request("POST", "/api/v1/tasks", {"title": "Подготовить релиз", "project_id": project_data["project"]["id"]})
+        _, note_data = self.client.request("POST", "/api/v1/notes", {"title": "План релиза", "content": "Проверить миграцию и кириллический Поиск"})
+        project, task, note = project_data["project"], task_data["task"], note_data["note"]
+
+        status, task_link_data = self.client.request("POST", "/api/v1/note-links", {"note_id": note["id"], "task_id": task["id"]})
+        self.assertEqual(status, 201)
+        task_link = task_link_data["note_link"]
+        status, project_link_data = self.client.request("POST", "/api/v1/note-links", {"note_id": note["id"], "project_id": project["id"]})
+        self.assertEqual(status, 201)
+        project_link = project_link_data["note_link"]
+        status, duplicate = self.client.request("POST", "/api/v1/note-links", {"note_id": note["id"], "task_id": task["id"]})
+        self.assertEqual((status, duplicate["error"]["code"]), (409, "conflict"))
+        status, invalid = self.client.request("POST", "/api/v1/note-links", {"note_id": note["id"], "task_id": task["id"], "project_id": project["id"]})
+        self.assertEqual((status, invalid["error"]["code"]), (422, "invalid_note_link"))
+
+        status, searched = self.client.request("GET", f"/api/v1/notes?q=КИРИЛЛИЧЕСКИЙ&task_id={task['id']}")
+        self.assertEqual((status, [item["id"] for item in searched["notes"]]), (200, [note["id"]]))
+        _, no_match = self.client.request("GET", "/api/v1/notes?q=несуществующее")
+        self.assertEqual(no_match["notes"], [])
+        self.client.request("PATCH", f"/api/v1/notes/{note['id']}", {"content": "Обновлённое содержимое", "expected_version": 1})
+        _, old_search = self.client.request("GET", "/api/v1/notes?q=миграцию")
+        _, new_search = self.client.request("GET", "/api/v1/notes?q=обновлённое")
+        self.assertEqual(old_search["notes"], [])
+        self.assertEqual([item["id"] for item in new_search["notes"]], [note["id"]])
+
+        other = ApiClient()
+        registration = self.register_and_verify(other, "links-other@example.com", "Другой")
+        other.token = registration["token"]
+        status, _ = other.request("POST", "/api/v1/note-links", {"note_id": note["id"], "task_id": task["id"]})
+        self.assertEqual(status, 404)
+        _, other_search = other.request("GET", "/api/v1/notes?q=обновлённое")
+        self.assertEqual(other_search["notes"], [])
+
+        self.client.request("DELETE", f"/api/v1/note-links/{task_link['id']}")
+        self.client.request("DELETE", f"/api/v1/projects/{project['id']}")
+        _, sync = self.client.request("GET", "/api/v1/sync?since=1970-01-01T00:00:00.000Z")
+        synced_links = {item["id"]: item for item in sync["note_links"]}
+        self.assertIsNotNone(synced_links[task_link["id"]]["deleted_at"])
+        self.assertIsNotNone(synced_links[project_link["id"]]["deleted_at"])
+
+    def test_note_links_survive_export_import_with_remapped_references(self):
+        _, project_data = self.client.request("POST", "/api/v1/projects", {"name": "Связанный проект"})
+        _, task_data = self.client.request("POST", "/api/v1/tasks", {"title": "Связанная задача", "project_id": project_data["project"]["id"]})
+        _, note_data = self.client.request("POST", "/api/v1/notes", {"title": "Связанная заметка", "content": "[[Другая заметка]]"})
+        self.client.request("POST", "/api/v1/note-links", {"note_id": note_data["note"]["id"], "task_id": task_data["task"]["id"]})
+        self.client.request("POST", "/api/v1/note-links", {"note_id": note_data["note"]["id"], "project_id": project_data["project"]["id"]})
+        _, exported = self.client.request("GET", "/api/v1/data/export")
+        self.assertEqual((exported["version"], len(exported["data"]["note_links"])), (9, 2))
+
+        imported = ApiClient()
+        registration = self.register_and_verify(imported, "links-import@example.com", "Импорт")
+        imported.token = registration["token"]
+        status, report = imported.request("POST", "/api/v1/data/import", exported)
+        self.assertEqual((status, report["imported"]["note_links"]), (201, 2))
+        _, imported_notes = imported.request("GET", "/api/v1/notes")
+        _, imported_links = imported.request("GET", "/api/v1/note-links")
+        _, imported_tasks = imported.request("GET", "/api/v1/tasks")
+        self.assertEqual({link["note_id"] for link in imported_links["note_links"]}, {imported_notes["notes"][0]["id"]})
+        self.assertEqual({link["task_id"] for link in imported_links["note_links"] if link["task_id"]}, {imported_tasks["tasks"][0]["id"]})
+        self.assertEqual({link["project_id"] for link in imported_links["note_links"] if link["project_id"]}, {imported_tasks["tasks"][0]["project_id"]})
+        self.assertNotEqual(imported_tasks["tasks"][0]["project_id"], project_data["project"]["id"])
+
     def test_optimistic_lock_rejects_stale_update(self):
         _, created = self.client.request("POST", "/api/v1/tasks", {"title": "Конфликт"})
         task_id = created["task"]["id"]
@@ -125,6 +301,23 @@ class ApiTests(unittest.TestCase):
         status, data = self.client.request("PATCH", f"/api/v1/tasks/{task_id}", {"priority": "low", "expected_version": 1})
         self.assertEqual(status, 409)
         self.assertEqual(data["error"]["code"], "version_conflict")
+
+    def test_task_manual_order_is_atomic_and_syncable(self):
+        _, columns = self.client.request("GET", "/api/v1/kanban/columns")
+        source, destination = columns["columns"][:2]
+        _, first = self.client.request("POST", "/api/v1/tasks", {"title": "Первая", "column_id": source["id"]})
+        _, second = self.client.request("POST", "/api/v1/tasks", {"title": "Вторая", "column_id": source["id"]})
+        self.assertLess(first["task"]["kanban_position"], second["task"]["kanban_position"])
+
+        status, moved = self.client.request("POST", f"/api/v1/tasks/{second['task']['id']}/move", {"column_id": source["id"], "before_task_id": first["task"]["id"], "expected_version": 1})
+        self.assertEqual(status, 200)
+        self.assertLess(moved["task"]["kanban_position"], first["task"]["kanban_position"])
+        status, stale = self.client.request("POST", f"/api/v1/tasks/{second['task']['id']}/move", {"column_id": destination["id"], "before_task_id": None, "expected_version": 1})
+        self.assertEqual((status, stale["error"]["code"]), (409, "version_conflict"))
+        _, tasks = self.client.request("GET", "/api/v1/tasks")
+        self.assertEqual(next(task for task in tasks["tasks"] if task["id"] == second["task"]["id"])["column_id"], source["id"])
+        _, sync = self.client.request("GET", "/api/v1/sync?since=1970-01-01T00:00:00.000Z")
+        self.assertIn("kanban_position", next(task for task in sync["tasks"] if task["id"] == second["task"]["id"]))
 
     def test_requires_authentication(self):
         self.client.token = ""
@@ -178,6 +371,9 @@ class ApiTests(unittest.TestCase):
         _, task_data = self.client.request("POST", "/api/v1/tasks", {"title": "Перенести", "description": "Данные", "project_id": project["id"], "status": "todo"})
         task = task_data["task"]
         self.client.request("POST", f"/api/v1/tasks/{task['id']}/checklist", {"title": "Пункт"})
+        self.client.request("POST", f"/api/v1/tasks/{task['id']}/messages", {"body": "История решения"})
+        _, folder_data = self.client.request("POST", "/api/v1/note-folders", {"name": "Экспорт заметок"})
+        self.client.request("POST", "/api/v1/notes", {"title": "Переносимая заметка", "content": "**Markdown**", "folder_id": folder_data["folder"]["id"], "is_favorite": True})
         self.client.request("POST", f"/api/v1/projects/{project['id']}/archive", {"expected_version": 1})
         status, exported = self.client.request("GET", "/api/v1/data/export")
         self.assertEqual(status, 200)
@@ -186,7 +382,7 @@ class ApiTests(unittest.TestCase):
 
         status, imported = self.client.request("POST", "/api/v1/data/import", exported)
         self.assertEqual(status, 201)
-        expected_counts = {key: len(exported["data"][key]) for key in ("projects", "tasks", "checklist_items")}
+        expected_counts = {key: len(exported["data"][key]) for key in ("projects", "kanban_columns", "tasks", "checklist_items", "task_messages", "note_folders", "notes", "note_links")}
         self.assertEqual(imported["imported"], expected_counts)
         _, all_projects = self.client.request("GET", "/api/v1/projects?include_archived=true")
         _, all_tasks = self.client.request("GET", "/api/v1/tasks")
@@ -196,6 +392,12 @@ class ApiTests(unittest.TestCase):
         imported_task = next(item for item in all_tasks["tasks"] if item["id"] != task["id"])
         self.assertIsNotNone(imported_project["archived_at"])
         self.assertEqual(imported_task["project_id"], imported_project["id"])
+        _, imported_messages = self.client.request("GET", f"/api/v1/messages?task_id={imported_task['id']}")
+        self.assertEqual([message["body"] for message in imported_messages["messages"]], ["История решения"])
+        _, all_folders = self.client.request("GET", "/api/v1/note-folders")
+        imported_folder = next(item for item in all_folders["folders"] if item["id"] != folder_data["folder"]["id"] and item["name"] == "Экспорт заметок")
+        _, all_notes = self.client.request("GET", f"/api/v1/notes?folder_id={imported_folder['id']}")
+        self.assertEqual((all_notes["notes"][0]["title"], all_notes["notes"][0]["content"], all_notes["notes"][0]["is_favorite"]), ("Переносимая заметка", "**Markdown**", True))
 
         broken = json.loads(json.dumps(exported))
         broken["data"]["tasks"][0]["project_id"] = "missing-project"
@@ -206,6 +408,117 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((status, error["error"]["code"]), (422, "invalid_import_reference"))
         _, unchanged = self.client.request("GET", "/api/v1/tasks")
         self.assertEqual(len(unchanged["tasks"]), 2)
+
+    def test_v1_taskflow_export_remains_importable(self):
+        legacy_export = {
+            "format": "taskflow-export",
+            "version": 1,
+            "data": {
+                "projects": [],
+                "tasks": [{"id": "legacy-task", "title": "Из старого экспорта", "status": "todo", "priority": "normal"}],
+                "checklist_items": [],
+            },
+        }
+        status, imported = self.client.request("POST", "/api/v1/data/import", legacy_export)
+        self.assertEqual(status, 201)
+        self.assertEqual(imported["imported"], {"projects": 0, "kanban_columns": 0, "tasks": 1, "checklist_items": 0, "task_messages": 0, "note_folders": 0, "notes": 0, "note_links": 0})
+        _, tasks = self.client.request("GET", "/api/v1/tasks")
+        task = next(item for item in tasks["tasks"] if item["title"] == "Из старого экспорта")
+        _, columns = self.client.request("GET", "/api/v1/kanban/columns")
+        column = next(item for item in columns["columns"] if item["id"] == task["column_id"])
+        self.assertEqual((task["status"], column["semantic_status"]), ("todo", "todo"))
+
+    def test_v3_taskflow_export_without_notes_remains_importable(self):
+        legacy_export = {
+            "format": "taskflow-export",
+            "version": 3,
+            "data": {"projects": [], "kanban_columns": [], "tasks": [], "checklist_items": [], "task_messages": []},
+        }
+        status, imported = self.client.request("POST", "/api/v1/data/import", legacy_export)
+        self.assertEqual(status, 201)
+        self.assertEqual(imported["imported"], {"projects": 0, "kanban_columns": 0, "tasks": 0, "checklist_items": 0, "task_messages": 0, "note_folders": 0, "notes": 0, "note_links": 0})
+
+    def test_custom_kanban_columns_can_be_managed_without_losing_tasks(self):
+        status, listed = self.client.request("GET", "/api/v1/kanban/columns")
+        self.assertEqual((status, len(listed["columns"])), (200, 4))
+        destination = listed["columns"][0]
+        status, protected = self.client.request("DELETE", f"/api/v1/kanban/columns/{destination['id']}", {"move_to_column_id": listed["columns"][1]["id"], "expected_version": destination["version"]})
+        self.assertEqual((status, protected["error"]["code"]), (422, "last_semantic_column"))
+
+        status, created = self.client.request("POST", "/api/v1/kanban/columns", {"name": "На проверке", "color": "#123456", "semantic_status": "in_progress"})
+        self.assertEqual(status, 201)
+        column = created["column"]
+        status, task_data = self.client.request("POST", "/api/v1/tasks", {"title": "Проверить", "column_id": column["id"]})
+        self.assertEqual((status, task_data["task"]["status"], task_data["task"]["column_id"]), (201, "in_progress", column["id"]))
+
+        status, changed = self.client.request("PATCH", f"/api/v1/kanban/columns/{column['id']}", {"name": "Проверено", "semantic_status": "done", "expected_version": 1})
+        self.assertEqual((status, changed["column"]["version"]), (200, 2))
+        _, tasks = self.client.request("GET", "/api/v1/tasks")
+        changed_task = next(item for item in tasks["tasks"] if item["id"] == task_data["task"]["id"])
+        self.assertEqual((changed_task["status"], changed_task["version"]), ("done", 2))
+
+        reordered_ids = [column["id"], *[item["id"] for item in listed["columns"]]]
+        status, reordered = self.client.request("POST", "/api/v1/kanban/columns/reorder", {"column_ids": reordered_ids})
+        self.assertEqual((status, reordered["columns"][0]["id"]), (200, column["id"]))
+
+        current_column = reordered["columns"][0]
+        status, deleted = self.client.request("DELETE", f"/api/v1/kanban/columns/{column['id']}", {"move_to_column_id": destination["id"], "expected_version": current_column["version"]})
+        self.assertEqual((status, deleted["moved_to_column_id"]), (200, destination["id"]))
+        _, tasks = self.client.request("GET", "/api/v1/tasks")
+        moved_task = next(item for item in tasks["tasks"] if item["id"] == task_data["task"]["id"])
+        self.assertEqual((moved_task["column_id"], moved_task["status"]), (destination["id"], destination["semantic_status"]))
+
+    def test_yougile_import_preserves_columns_tasks_and_subtasks_atomically(self):
+        export = {
+            "title": "Разработка",
+            "stickers": [],
+            "boards": [{
+                "title": "Релиз",
+                "stickers": {},
+                "columns": [
+                    {"title": "Ожидающие", "color": "", "tasks": ["root-todo"]},
+                    {"title": "В процессе", "color": "#123456", "tasks": ["root-progress"]},
+                    {"title": "Готово", "color": "", "tasks": ["root-done"]},
+                ],
+            }],
+            "tasks": {
+                "root-todo": {"title": "Запланировать", "description": "Описание", "subtasks": ["child-one"], "chat": {"messages": {"comment": {"id": "comment", "timestamp": 1722510000000, "dataType": "ChatMessage", "text": "Обсудить сроки", "properties": {}}}}},
+                "child-one": {"title": "Первый шаг", "description": "", "subtasks": ["child-nested"], "chat": {"messages": {"move": {"id": "move", "timestamp": 1722511000000, "dataType": "ChatMessage", "text": "", "properties": {"fromSystem": True, "move": True, "from": "uuid-one", "to": "uuid-two"}}}}},
+                "child-nested": {"title": "Вложенный шаг", "description": "", "subtasks": []},
+                "root-progress": {"title": "Реализовать", "description": "", "subtasks": []},
+                "root-done": {"title": "Выпущено", "description": "", "subtasks": []},
+            },
+        }
+        status, imported = self.client.request("POST", "/api/v1/data/import/yougile", export)
+        self.assertEqual(status, 201)
+        self.assertEqual(imported["imported"], {"projects": 1, "kanban_columns": 3, "tasks": 3, "checklist_items": 2, "task_messages": 2, "note_folders": 0, "notes": 0, "note_links": 0})
+        self.assertEqual(imported["skipped"], {"chat_messages": 0, "stickers": 0, "subtask_descriptions": 0})
+
+        _, projects = self.client.request("GET", "/api/v1/projects")
+        project = next(item for item in projects["projects"] if item["name"] == "Разработка")
+        _, columns = self.client.request("GET", "/api/v1/kanban/columns")
+        imported_columns = {item["name"]: item for item in columns["columns"] if item["name"] in {"Ожидающие", "В процессе", "Готово"}}
+        self.assertEqual(imported_columns["В процессе"]["color"], "#123456")
+        _, tasks = self.client.request("GET", "/api/v1/tasks")
+        imported_tasks = {item["title"]: item for item in tasks["tasks"] if item["project_id"] == project["id"]}
+        self.assertEqual(imported_tasks["Запланировать"]["status"], "todo")
+        self.assertEqual(imported_tasks["Реализовать"]["column_id"], imported_columns["В процессе"]["id"])
+        self.assertEqual(imported_tasks["Выпущено"]["status"], "done")
+        self.assertIn("YouGile · доска «Релиз» · колонка «Ожидающие»", imported_tasks["Запланировать"]["description"])
+        _, checklist = self.client.request("GET", f"/api/v1/checklist?task_id={imported_tasks['Запланировать']['id']}")
+        self.assertEqual([item["title"] for item in checklist["checklist_items"]], ["Первый шаг", "↳ Вложенный шаг"])
+        _, messages = self.client.request("GET", f"/api/v1/messages?task_id={imported_tasks['Запланировать']['id']}")
+        self.assertEqual([message["kind"] for message in messages["messages"]], ["comment", "system"])
+        self.assertEqual(messages["messages"][0]["body"], "Обсудить сроки")
+        self.assertIn("Подзадача «Первый шаг»", messages["messages"][1]["body"])
+        self.assertNotIn("uuid-one", messages["messages"][1]["body"])
+
+        broken = json.loads(json.dumps(export))
+        broken["tasks"]["root-todo"]["subtasks"] = ["missing"]
+        status, error = self.client.request("POST", "/api/v1/data/import/yougile", broken)
+        self.assertEqual((status, error["error"]["code"]), (422, "invalid_yougile_reference"))
+        _, unchanged = self.client.request("GET", "/api/v1/projects")
+        self.assertEqual(len([item for item in unchanged["projects"] if item["name"] == "Разработка"]), 1)
 
     def test_task_can_move_between_projects_and_days(self):
         _, first = self.client.request("POST", "/api/v1/projects", {"name": "Первый"})
@@ -239,6 +552,46 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(cleared_due["task"]["scheduled_date"], "2026-08-02")
         self.assertIsNone(cleared_due["task"]["due_at"])
+
+    def test_completing_recurring_task_creates_single_next_instance(self):
+        completed_on = server.now_iso()[:10]
+        for recurrence, expected_date in (("daily", server.next_recurrence_date("daily", completed_on)), ("weekly", server.next_recurrence_date("weekly", completed_on)), ("monthly", server.next_recurrence_date("monthly", completed_on))):
+            status, created = self.client.request("POST", "/api/v1/tasks", {"title": recurrence, "scheduled_date": "2026-08-01", "due_at": "2026-08-01T12:00:00Z", "recurrence": recurrence, "priority": "high", "estimated_minutes": 30})
+            self.assertEqual(status, 201)
+            status, completed = self.client.request("PATCH", f"/api/v1/tasks/{created['task']['id']}", {"status": "done", "expected_version": 1})
+            self.assertEqual(status, 200)
+            next_task = completed["next_task"]
+            self.assertEqual((next_task["title"], next_task["scheduled_date"], next_task["recurrence"], next_task["due_at"], next_task["status"]), (recurrence, expected_date, recurrence, None, "todo"))
+            status, repeated = self.client.request("PATCH", f"/api/v1/tasks/{created['task']['id']}", {"priority": "low", "expected_version": 2})
+            self.assertEqual((status, repeated["next_task"]), (200, None))
+        _, tasks = self.client.request("GET", "/api/v1/tasks")
+        self.assertEqual(len([task for task in tasks["tasks"] if task["title"] in {"daily", "weekly", "monthly"}]), 6)
+
+    def test_recurrence_is_validated_and_survives_export_import(self):
+        status, invalid = self.client.request("POST", "/api/v1/tasks", {"title": "Неверное", "recurrence": "yearly"})
+        self.assertEqual((status, invalid["error"]["code"]), (422, "invalid_recurrence"))
+        _, created = self.client.request("POST", "/api/v1/tasks", {"title": "Каждый день", "recurrence": "daily"})
+        _, exported = self.client.request("GET", "/api/v1/data/export")
+        self.assertEqual(exported["version"], 9)
+        imported = ApiClient()
+        registration = self.register_and_verify(imported, "recurrence-import@example.com", "Импорт")
+        imported.token = registration["token"]
+        self.assertEqual(imported.request("POST", "/api/v1/data/import", exported)[0], 201)
+        _, tasks = imported.request("GET", "/api/v1/tasks")
+        self.assertEqual(next(task for task in tasks["tasks"] if task["title"] == created["task"]["title"])["recurrence"], "daily")
+
+    def test_reminders_require_due_at_and_survive_export_import(self):
+        status, response = self.client.request("POST", "/api/v1/tasks", {"title": "Без срока", "reminder_offsets": [15]})
+        self.assertEqual((status, response["error"]["code"]), (422, "reminder_requires_due_at"))
+        status, created = self.client.request("POST", "/api/v1/tasks", {"title": "Напомнить", "due_at": "2026-12-01T12:00:00Z", "reminder_offsets": [60, 0, 60]})
+        self.assertEqual((status, created["task"]["reminder_offsets"]), (201, [0, 60]))
+        _, exported = self.client.request("GET", "/api/v1/data/export")
+        imported = ApiClient()
+        registration = self.register_and_verify(imported, "reminder-import@example.com", "Импорт")
+        imported.token = registration["token"]
+        self.assertEqual(imported.request("POST", "/api/v1/data/import", exported)[0], 201)
+        _, tasks = imported.request("GET", "/api/v1/tasks")
+        self.assertEqual(next(task for task in tasks["tasks"] if task["title"] == "Напомнить")["reminder_offsets"], [0, 60])
 
     def test_users_cannot_access_each_others_projects(self):
         _, created = self.client.request("POST", "/api/v1/projects", {"name": "Приватный"})
@@ -276,6 +629,33 @@ class ApiTests(unittest.TestCase):
         status, by_date = self.client.request("GET", "/api/v1/tasks?scheduled_date=2026-08-01")
         self.assertEqual(status, 200)
         self.assertEqual([task["title"] for task in by_date["tasks"]], ["Сегодня"])
+        self.client.request("POST", "/api/v1/tasks", {"title": "Конец недели", "scheduled_date": "2026-08-07"})
+        status, week = self.client.request("GET", "/api/v1/tasks?scheduled_from=2026-08-01&scheduled_to=2026-08-07")
+        self.assertEqual((status, {task["title"] for task in week["tasks"]}), (200, {"Сегодня", "Конец недели"}))
+        status, invalid = self.client.request("GET", "/api/v1/tasks?scheduled_from=2026-08-08&scheduled_to=2026-08-01")
+        self.assertEqual((status, invalid["error"]["code"]), (422, "invalid_date_range"))
+
+    def test_tags_are_normalized_and_survive_export_import(self):
+        status, created = self.client.request("POST", "/api/v1/tasks", {"title": "Теги", "tags": ["Работа", "  срочно ", "Работа", ""]})
+        self.assertEqual((status, created["task"]["tags"]), (201, ["Работа", "срочно"]))
+        status, invalid = self.client.request("POST", "/api/v1/tasks", {"title": "Неверно", "tags": "работа"})
+        self.assertEqual((status, invalid["error"]["code"]), (422, "invalid_tags"))
+        _, exported = self.client.request("GET", "/api/v1/data/export")
+        self.assertEqual(exported["version"], 9)
+        imported = ApiClient()
+        registration = self.register_and_verify(imported, "tags-import@example.com", "Импорт")
+        imported.token = registration["token"]
+        self.assertEqual(imported.request("POST", "/api/v1/data/import", exported)[0], 201)
+        _, tasks = imported.request("GET", "/api/v1/tasks")
+        self.assertEqual(next(task for task in tasks["tasks"] if task["title"] == "Теги")["tags"], ["Работа", "срочно"])
+
+    def test_task_history_records_create_update_and_move(self):
+        _, created = self.client.request("POST", "/api/v1/tasks", {"title": "История"})
+        task = created["task"]
+        self.client.request("PATCH", f'/api/v1/tasks/{task["id"]}', {"title": "История обновлена", "expected_version": task["version"]})
+        _, history = self.client.request("GET", f'/api/v1/tasks/{task["id"]}/history')
+        self.assertEqual([entry["event_type"] for entry in history["history"]], ["created", "updated"])
+        self.assertEqual(history["history"][1]["changes"]["title"], "История обновлена")
 
     def test_health_reports_application_and_schema_versions(self):
         status, data = self.client.request("GET", "/api/health")
@@ -370,6 +750,176 @@ class ApiTests(unittest.TestCase):
             schema_version = db.execute("PRAGMA user_version").fetchone()[0]
         self.assertEqual((project["name"], project["archived_at"]), ("Старый проект", None))
         self.assertEqual(schema_version, server.SCHEMA_VERSION)
+
+    def test_schema_v4_migration_assigns_existing_tasks_to_default_columns(self):
+        legacy_path = Path(self.temp.name) / "legacy-v4.db"
+        with closing(sqlite3.connect(legacy_path)) as db:
+            db.execute("CREATE TABLE users(id TEXT PRIMARY KEY,email TEXT,display_name TEXT,password_hash TEXT,created_at TEXT,email_verified_at TEXT)")
+            db.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL REFERENCES users(id),project_id TEXT,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'inbox',priority TEXT NOT NULL DEFAULT 'normal',scheduled_date TEXT,due_at TEXT,estimated_minutes INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,deleted_at TEXT)")
+            db.execute("INSERT INTO users VALUES ('owner','owner@example.com','Owner','hash','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')")
+            db.execute("INSERT INTO tasks VALUES ('legacy-task','owner',NULL,'Сохранить задачу','','todo','normal',NULL,NULL,NULL,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',1,NULL)")
+            db.execute("PRAGMA user_version=4")
+            db.commit()
+        server.DB_PATH = legacy_path
+        server.init_db()
+        with server.connect() as db:
+            task = db.execute("SELECT title,status,column_id FROM tasks WHERE id='legacy-task'").fetchone()
+            column = db.execute("SELECT semantic_status FROM kanban_columns WHERE id=?", (task["column_id"],)).fetchone()
+            schema_version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual((task["title"], task["status"], column["semantic_status"]), ("Сохранить задачу", "todo", "todo"))
+        self.assertEqual(schema_version, server.SCHEMA_VERSION)
+
+    def test_schema_v5_migration_preserves_tasks_and_adds_discussions(self):
+        legacy_path = Path(self.temp.name) / "legacy-v5.db"
+        server.DB_PATH = legacy_path
+        server.init_db()
+        timestamp = server.now_iso()
+        with server.connect() as db:
+            db.execute("INSERT INTO users(id,email,display_name,password_hash,created_at,email_verified_at) VALUES (?,?,?,?,?,?)", ("owner", "owner@example.com", "Owner", "hash", timestamp, timestamp))
+            server.ensure_default_kanban_columns(db, "owner", timestamp)
+            column_id = db.execute("SELECT id FROM kanban_columns WHERE owner_id='owner' AND semantic_status='todo'").fetchone()[0]
+            db.execute("INSERT INTO tasks(id,owner_id,project_id,column_id,title,description,status,priority,created_at,updated_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("legacy-task", "owner", None, column_id, "Сохранить задачу", "", "todo", "normal", timestamp, timestamp, 1))
+            db.execute("DROP TABLE task_messages")
+            db.execute("PRAGMA user_version=5")
+        server.init_db()
+        with server.connect() as db:
+            task = db.execute("SELECT title FROM tasks WHERE id='legacy-task'").fetchone()
+            message_table = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='task_messages'").fetchone()
+            schema_version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(task["title"], "Сохранить задачу")
+        self.assertIsNotNone(message_table)
+        self.assertEqual(schema_version, server.SCHEMA_VERSION)
+
+    def test_schema_v6_migration_adds_notes_without_touching_existing_data(self):
+        legacy_path = Path(self.temp.name) / "legacy-v6.db"
+        server.DB_PATH = legacy_path
+        server.init_db()
+        timestamp = server.now_iso()
+        with server.connect() as db:
+            db.execute("INSERT INTO users(id,email,display_name,password_hash,created_at,email_verified_at) VALUES (?,?,?,?,?,?)", ("owner", "owner@example.com", "Owner", "hash", timestamp, timestamp))
+            db.execute("DROP TABLE notes")
+            db.execute("DROP TABLE note_folders")
+            db.execute("PRAGMA user_version=6")
+        server.init_db()
+        with server.connect() as db:
+            user = db.execute("SELECT display_name FROM users WHERE id='owner'").fetchone()
+            notes_table = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'").fetchone()
+            folders_table = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='note_folders'").fetchone()
+            schema_version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(user["display_name"], "Owner")
+        self.assertIsNotNone(notes_table)
+        self.assertIsNotNone(folders_table)
+        self.assertEqual(schema_version, server.SCHEMA_VERSION)
+
+    def test_schema_v7_migration_indexes_existing_notes_and_adds_links(self):
+        server.init_db()
+        timestamp = server.now_iso()
+        with server.connect() as db:
+            owner_id = db.execute("SELECT id FROM users LIMIT 1").fetchone()[0]
+            db.execute("INSERT INTO notes(id,owner_id,folder_id,title,content,is_favorite,created_at,updated_at,version,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?)", ("legacy-note", owner_id, None, "Старая заметка", "Данные миграции", 0, timestamp, timestamp, 1, None))
+            db.execute("DROP TABLE note_links")
+            db.execute("DROP TABLE notes_fts")
+            db.execute("PRAGMA user_version=7")
+        server.init_db()
+        with server.connect() as db:
+            indexed = db.execute("SELECT note_id FROM notes_fts WHERE notes_fts MATCH 'миграции'").fetchone()[0]
+            links_table = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='note_links'").fetchone()
+            schema_version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(indexed, "legacy-note")
+        self.assertIsNotNone(links_table)
+        self.assertEqual(schema_version, server.SCHEMA_VERSION)
+
+    def test_schema_v8_migration_adds_deterministic_kanban_positions(self):
+        server.init_db()
+        with server.connect() as db:
+            tasks = db.execute("SELECT id FROM tasks ORDER BY created_at,id").fetchall()
+            db.execute("DROP INDEX IF EXISTS tasks_owner_column_position")
+            db.execute("PRAGMA user_version=8")
+        server.init_db()
+        with server.connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()}
+            positions = [row[0] for row in db.execute("SELECT kanban_position FROM tasks WHERE deleted_at IS NULL ORDER BY kanban_position").fetchall()]
+            schema_version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertIn("kanban_position", columns)
+        self.assertEqual(len(positions), len(tasks))
+        self.assertTrue(all(position > 0 for position in positions))
+        self.assertEqual(schema_version, server.SCHEMA_VERSION)
+
+    def test_schema_v9_migration_adds_recurrence_without_touching_tasks(self):
+        server.init_db()
+        with server.connect() as db:
+            timestamp = server.now_iso()
+            owner_id = db.execute("SELECT id FROM users LIMIT 1").fetchone()[0]
+            server.ensure_default_kanban_columns(db, owner_id, timestamp)
+            column_id = db.execute("SELECT id FROM kanban_columns WHERE owner_id=? LIMIT 1", (owner_id,)).fetchone()[0]
+            task_id = "legacy-recurrence-task"
+            db.execute("INSERT INTO tasks(id,owner_id,column_id,title,description,status,priority,kanban_position,created_at,updated_at,version,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, owner_id, column_id, "Старая задача", "", "inbox", "normal", 1024, timestamp, timestamp, 1, None))
+            db.execute("PRAGMA user_version=9")
+        server.init_db()
+        with server.connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()}
+            recurrence = db.execute("SELECT recurrence FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+        self.assertIn("recurrence", columns)
+        self.assertIsNone(recurrence)
+
+    def test_schema_v10_migration_adds_reminders_without_touching_tasks(self):
+        server.init_db()
+        with server.connect() as db:
+            timestamp = server.now_iso()
+            owner_id = db.execute("SELECT id FROM users LIMIT 1").fetchone()[0]
+            server.ensure_default_kanban_columns(db, owner_id, timestamp)
+            column_id = db.execute("SELECT id FROM kanban_columns WHERE owner_id=? LIMIT 1", (owner_id,)).fetchone()[0]
+            task_id = "legacy-reminder-task"
+            db.execute("INSERT INTO tasks(id,owner_id,column_id,title,description,status,priority,kanban_position,recurrence,created_at,updated_at,version,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, owner_id, column_id, "Старая задача", "", "inbox", "normal", 1024, "daily", timestamp, timestamp, 1, None))
+            db.execute("PRAGMA user_version=10")
+        server.init_db()
+        with server.connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()}
+            task = db.execute("SELECT recurrence,reminder_offsets FROM tasks WHERE id=?", (task_id,)).fetchone()
+        self.assertIn("reminder_offsets", columns)
+        self.assertEqual((task["recurrence"], task["reminder_offsets"]), ("daily", None))
+
+    def test_schema_v11_migration_adds_tags_without_touching_tasks(self):
+        server.init_db()
+        with server.connect() as db:
+            timestamp = server.now_iso()
+            owner_id = db.execute("SELECT id FROM users LIMIT 1").fetchone()[0]
+            server.ensure_default_kanban_columns(db, owner_id, timestamp)
+            column_id = db.execute("SELECT id FROM kanban_columns WHERE owner_id=? LIMIT 1", (owner_id,)).fetchone()[0]
+            task_id = "legacy-tags-task"
+            db.execute("INSERT INTO tasks(id,owner_id,column_id,title,description,status,priority,kanban_position,created_at,updated_at,version,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, owner_id, column_id, "Старая задача", "", "inbox", "normal", 1024, timestamp, timestamp, 1, None))
+            db.execute("PRAGMA user_version=11")
+        server.init_db()
+        with server.connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()}
+            tags = db.execute("SELECT tags FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+        self.assertIn("tags", columns)
+        self.assertIsNone(tags)
+
+    def test_schema_v12_migration_adds_task_history(self):
+        server.init_db()
+        with server.connect() as db:
+            db.execute("PRAGMA user_version=12")
+            db.execute("DROP TABLE IF EXISTS task_history")
+        server.init_db()
+        with server.connect() as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertIn("task_history", tables)
+        self.assertEqual(version, server.SCHEMA_VERSION)
+
+    def test_schema_v13_migration_adds_account_recovery_tokens(self):
+        server.init_db()
+        with server.connect() as db:
+            db.execute("DROP TABLE password_reset_tokens")
+            db.execute("DROP TABLE pending_email_change_tokens")
+            db.execute("PRAGMA user_version=13")
+        server.init_db()
+        with server.connect() as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertTrue({"password_reset_tokens", "pending_email_change_tokens"}.issubset(tables))
+        self.assertEqual(version, server.SCHEMA_VERSION)
 
     def test_smtp_sender_uses_starttls_and_keeps_token_out_of_request_url(self):
         previous = (

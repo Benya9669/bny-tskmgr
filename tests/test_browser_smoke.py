@@ -167,6 +167,13 @@ class BrowserSmokeTests(unittest.TestCase):
         notes_section.get_by_role("button", name="Жирный").click()
         expect(notes_section.get_by_label("Текст заметки в Markdown")).to_have_value(re.compile(r".*\*\*текст\*\*$", re.DOTALL))
         expect(notes_section.locator("#noteSaveStatus")).to_have_text("Сохранено", timeout=8_000)
+        note_card = notes_section.locator(".note-list-item").filter(has_text="План выпуска")
+        self.assertEqual(note_card.evaluate("element => Math.round(element.getBoundingClientRect().height)"), 112)
+        self.assertEqual(notes_section.locator(".note-folder-row input").evaluate("element => getComputedStyle(element).textAlign"), "left")
+        toolbar_bottom, textarea_top = notes_section.locator(".note-source").evaluate(
+            "source => { const toolbar = source.querySelector('.markdown-toolbar').getBoundingClientRect(); const textarea = source.querySelector('textarea').getBoundingClientRect(); return [Math.round(toolbar.bottom), Math.round(textarea.top)]; }"
+        )
+        self.assertEqual(toolbar_bottom, textarea_top)
         notes_section.get_by_role("button", name="Просмотр").click()
         expect(notes_section.get_by_role("heading", name="Релиз", exact=True)).to_be_visible()
         expect(notes_section.locator("#notePreview img")).to_have_count(0)

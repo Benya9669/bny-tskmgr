@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "TaskFlow",
+  "short_name": "TaskFlow",
+  "description": "Self-hosted планер задач и заметок.",
+  "lang": "ru",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f3ee",
+  "theme_color": "#f5f3ee",
+  "icons": [
+    {
+      "src": "/icons/taskflow-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/taskflow-maskable.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

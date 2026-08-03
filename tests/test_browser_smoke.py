@@ -159,6 +159,7 @@ class BrowserSmokeTests(unittest.TestCase):
 
         self.page.locator('[data-view="notes"]').first.click()
         notes_section = self.page.get_by_role("region", name="Заметки")
+        self.assertTrue(self.page.evaluate("Boolean(Object.keys(localStorage).find(key => key.startsWith('taskflow_snapshot_')) )"))
         notes_section.get_by_label("Название новой папки").fill("Документация")
         notes_section.get_by_role("button", name="Добавить папку").click()
         notes_section.locator('#newNote').click()
@@ -293,6 +294,11 @@ class BrowserSmokeTests(unittest.TestCase):
 
     def test_desktop_recurring_task_creates_next_instance(self) -> None:
         self.login()
+        queue = self.page.evaluate("""() => {
+            const key = Object.keys(localStorage).find(key => key.startsWith('taskflow_mutations_'));
+            return { key: key || null, queue: key ? JSON.parse(localStorage.getItem(key)) : [] };
+        }""")
+        self.assertEqual(queue["queue"], [])
         self.page.locator("#addTask").click()
         dialog = self.page.locator("#taskDialog")
         dialog.get_by_label("Название").fill("Ежедневная проверка")
@@ -308,6 +314,17 @@ class BrowserSmokeTests(unittest.TestCase):
 
     def test_desktop_task_reminder_options_are_available(self) -> None:
         self.login()
+        self.page.evaluate("""() => {
+            const dialog = document.querySelector('#conflictDialog');
+            document.querySelector('#conflictDescription').textContent = 'Конфликт';
+            document.querySelector('#conflictServerTitle').textContent = 'Серверная';
+            document.querySelector('#conflictLocalTitle').textContent = 'Локальная';
+            dialog.showModal();
+        }""")
+        conflict = self.page.locator("#conflictDialog")
+        expect(conflict.get_by_role("button", name="Оставить серверную")).to_be_visible()
+        expect(conflict.get_by_role("button", name="Применить моё")).to_be_visible()
+        conflict.get_by_role("button", name="Закрыть").click()
         self.page.locator("#addTask").click()
         dialog = self.page.locator("#taskDialog")
         dialog.get_by_label("Название").fill("Напомнить о встрече")
@@ -318,6 +335,15 @@ class BrowserSmokeTests(unittest.TestCase):
         expect(dialog.get_by_label("За час")).to_be_checked()
         expect(dialog.locator('input[name="reminder_offsets"][value="0"]')).to_be_checked()
         self.assertEqual(self.page_errors, [])
+
+    def test_desktop_account_dialog_offers_logout(self) -> None:
+        self.login()
+        self.page.locator("#logout").click()
+        account = self.page.locator("#accountDialog")
+        expect(account.get_by_role("button", name="Выйти")).to_be_visible()
+        expect(account.get_by_role("heading", name="Активные устройства")).to_be_visible()
+        expect(account.get_by_text("это устройство")).to_be_visible()
+        expect(account.get_by_label("Часовой пояс")).to_be_visible()
 
     def test_desktop_task_tags_are_available(self) -> None:
         self.login()

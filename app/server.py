@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import calendar
+import gzip
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -13,6 +15,7 @@ import smtplib
 import sqlite3
 import time
 import uuid
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -28,6 +31,8 @@ STATIC_DIR = ROOT / "web"
 DB_PATH = Path(os.getenv("TASKFLOW_DB", ROOT / "data" / "taskflow.db"))
 TOKEN_SECRET = os.getenv("TASKFLOW_SECRET", "")
 TOKEN_TTL_DAYS = int(os.getenv("TASKFLOW_TOKEN_TTL_DAYS", "30"))
+ACCESS_TOKEN_TTL_MINUTES = int(os.getenv("TASKFLOW_ACCESS_TOKEN_TTL_MINUTES", "15"))
+REFRESH_TOKEN_TTL_DAYS = int(os.getenv("TASKFLOW_REFRESH_TOKEN_TTL_DAYS", "30"))
 HOST = os.getenv("TASKFLOW_HOST", "0.0.0.0")
 PORT = int(os.getenv("TASKFLOW_PORT", "8080"))
 ALLOWED_ORIGIN = os.getenv("TASKFLOW_ALLOWED_ORIGIN", "")
@@ -43,7 +48,7 @@ PASSWORD_RESET_TTL_HOURS = int(os.getenv("TASKFLOW_PASSWORD_RESET_TTL_HOURS", "1
 EMAIL_CHANGE_TTL_HOURS = int(os.getenv("TASKFLOW_EMAIL_CHANGE_TTL_HOURS", "24"))
 VERSION_FILE = ROOT / "VERSION"
 APP_VERSION = os.getenv("TASKFLOW_VERSION", VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "development")
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 17
 EXPORT_FORMAT = "taskflow-export"
 EXPORT_VERSION = 9
 
@@ -117,6 +122,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 email TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 display_name TEXT NOT NULL,
+                timezone TEXT NOT NULL DEFAULT 'UTC',
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 email_verified_at TEXT
@@ -281,6 +287,30 @@ def init_db() -> None:
             );
             """
         )
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS client_mutations (
+                owner_id TEXT NOT NULL REFERENCES users(id),
+                id TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                response TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(owner_id, id)
+            );
+            CREATE INDEX IF NOT EXISTS client_mutations_owner_created ON client_mutations(owner_id, created_at);
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                refresh_token_hash TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS sessions_user_active ON sessions(user_id, revoked_at, expires_at);
+            """
+        )
         if current_version < 2:
             user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
             if "email_verified_at" not in user_columns:
@@ -329,6 +359,16 @@ def init_db() -> None:
         if current_version < 14:
             db.execute("DELETE FROM password_reset_tokens WHERE expires_at <= ?", (now_iso(),))
             db.execute("DELETE FROM pending_email_change_tokens WHERE expires_at <= ?", (now_iso(),))
+        if current_version < 15:
+            db.execute("DELETE FROM client_mutations WHERE created_at < ?", ((datetime.now(UTC) - timedelta(days=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),))
+        if current_version < 16:
+            db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now_iso(),))
+        if current_version < 17:
+            user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+            if "timezone" not in user_columns:
+                db.execute("ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'")
+        if current_version < 15:
+            db.execute("DELETE FROM client_mutations WHERE created_at < ?", ((datetime.now(UTC) - timedelta(days=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),))
         db.execute("CREATE INDEX IF NOT EXISTS tasks_owner_column_position ON tasks(owner_id,column_id,kanban_position,created_at,id)")
         if current_version < SCHEMA_VERSION:
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -354,8 +394,10 @@ def secret() -> bytes:
     return value.encode()
 
 
-def issue_token(user_id: str) -> str:
-    payload = {"sub": user_id, "exp": int(time.time()) + TOKEN_TTL_DAYS * 86400}
+def issue_token(user_id: str, session_id: str | None = None) -> str:
+    payload = {"sub": user_id, "exp": int(time.time()) + (ACCESS_TOKEN_TTL_MINUTES * 60 if session_id else TOKEN_TTL_DAYS * 86400)}
+    if session_id:
+        payload["sid"] = session_id
     body = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).rstrip(b"=")
     signature = base64.urlsafe_b64encode(hmac.new(secret(), body, hashlib.sha256).digest()).rstrip(b"=")
     return f"{body.decode()}.{signature.decode()}"
@@ -371,6 +413,43 @@ def verify_token(token: str) -> str | None:
         return payload["sub"] if payload["exp"] > time.time() else None
     except (ValueError, KeyError, TypeError, json.JSONDecodeError):
         return None
+
+
+def token_payload(token: str) -> dict[str, Any] | None:
+    try:
+        body, supplied = token.split(".", 1)
+        expected = base64.urlsafe_b64encode(hmac.new(secret(), body.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
+        if not hmac.compare_digest(supplied, expected):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        return payload if payload.get("exp", 0) > time.time() else None
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+SYNC_TABLES = (
+    ("tasks", "updated_at", "tasks"), ("projects", "updated_at", "projects"), ("kanban_columns", "updated_at", "kanban_columns"),
+    ("checklist_items", "updated_at", "checklist_items"), ("task_messages", "updated_at", "task_messages"), ("note_folders", "updated_at", "note_folders"),
+    ("notes", "updated_at", "notes"), ("note_links", "updated_at", "note_links"), ("task_history", "created_at", "task_history"),
+)
+
+
+def sync_cursor_encode(snapshot: str, timestamp: str, entity: str, item_id: str) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"snapshot": snapshot, "timestamp": timestamp, "entity": entity, "id": item_id}, separators=(",", ":")).encode()).rstrip(b"=").decode()
+
+
+def sync_cursor_decode(cursor: str) -> dict[str, str]:
+    try:
+        value = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        if set(value) != {"snapshot", "timestamp", "entity", "id"} or not all(isinstance(value[key], str) for key in value):
+            raise ValueError
+        return value
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ApiError(422, "invalid_cursor", "Параметр cursor недействителен") from exc
+
+
+def refresh_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -585,6 +664,13 @@ class Application:
             headers.extend([("Access-Control-Allow-Origin", ALLOWED_ORIGIN), ("Vary", "Origin")])
         return status, headers, body
 
+    def compressed_json_response(self, status: int, payload: Any, environ: dict[str, Any]):
+        response_status, headers, body = self.json_response(status, payload)
+        if "gzip" in environ.get("HTTP_ACCEPT_ENCODING", "") and len(body) >= 1024:
+            body = gzip.compress(body)
+            headers = [(name, value) for name, value in headers if name != "Content-Length"] + [("Content-Encoding", "gzip"), ("Vary", "Accept-Encoding"), ("Content-Length", str(len(body)))]
+        return response_status, headers, body
+
     def body(self, environ: dict[str, Any]) -> dict[str, Any]:
         try:
             size = int(environ.get("CONTENT_LENGTH") or 0)
@@ -600,9 +686,15 @@ class Application:
     def user_id(self, environ: dict[str, Any]) -> str:
         auth = environ.get("HTTP_AUTHORIZATION", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
-        user_id = verify_token(token)
+        payload = token_payload(token)
+        user_id = payload.get("sub") if payload else None
         if not user_id:
             raise ApiError(401, "unauthorized", "Требуется авторизация")
+        if payload.get("sid"):
+            with connect() as db:
+                active = db.execute("SELECT 1 FROM sessions WHERE id=? AND user_id=? AND revoked_at IS NULL AND expires_at>?", (payload["sid"], user_id, now_iso())).fetchone()
+            if not active:
+                raise ApiError(401, "session_revoked", "Сессия завершена")
         return user_id
 
     def dispatch(self, environ: dict[str, Any]):
@@ -618,6 +710,8 @@ class Application:
             return self.register(self.body(environ))
         if path == "/api/v1/auth/login" and method == "POST":
             return self.login(self.body(environ))
+        if path == "/api/v1/auth/refresh" and method == "POST":
+            return self.refresh_session(self.body(environ))
         if path == "/api/v1/auth/verify-email" and method == "POST":
             return self.verify_email(self.body(environ))
         if path == "/api/v1/auth/resend-verification" and method == "POST":
@@ -675,7 +769,29 @@ class Application:
             raise ApiError(401, "invalid_credentials", "Неверный email или пароль")
         if not user["email_verified_at"]:
             raise ApiError(403, "email_not_verified", "Сначала подтвердите email по ссылке из письма")
-        return self.json_response(200, {"token": issue_token(user["id"]), "user": {"id": user["id"], "email": user["email"], "display_name": user["display_name"]}})
+        tokens = self.create_session(user["id"], str(data.get("device_name", "Этот браузер")))
+        return self.json_response(200, {**tokens, "user": {"id": user["id"], "email": user["email"], "display_name": user["display_name"]}})
+
+    def create_session(self, user_id: str, label: str) -> dict[str, str]:
+        timestamp = now_iso()
+        session_id, refresh_token = str(uuid.uuid4()), secrets.token_urlsafe(48)
+        expires_at = (datetime.now(UTC) + timedelta(days=REFRESH_TOKEN_TTL_DAYS)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with connect() as db:
+            db.execute("INSERT INTO sessions(id,user_id,refresh_token_hash,label,created_at,last_used_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,NULL)", (session_id, user_id, refresh_token_hash(refresh_token), label[:80] or "Этот браузер", timestamp, timestamp, expires_at))
+        return {"token": issue_token(user_id, session_id), "refresh_token": refresh_token, "session_id": session_id}
+
+    def refresh_session(self, data: dict[str, Any]):
+        refresh_token = str(data.get("refresh_token", ""))
+        if len(refresh_token) < 32:
+            raise ApiError(401, "invalid_refresh_token", "Сессия недействительна")
+        timestamp = now_iso()
+        with connect() as db:
+            session = db.execute("SELECT * FROM sessions WHERE refresh_token_hash=?", (refresh_token_hash(refresh_token),)).fetchone()
+            if not session or session["revoked_at"] or session["expires_at"] <= timestamp:
+                raise ApiError(401, "invalid_refresh_token", "Сессия недействительна")
+            replacement = secrets.token_urlsafe(48)
+            db.execute("UPDATE sessions SET refresh_token_hash=?,last_used_at=? WHERE id=?", (refresh_token_hash(replacement), timestamp, session["id"]))
+        return self.json_response(200, {"token": issue_token(session["user_id"], session["id"]), "refresh_token": replacement, "session_id": session["id"]})
 
     def verify_email(self, data: dict[str, Any]):
         token = str(data.get("token", "")).strip()
@@ -794,9 +910,9 @@ class Application:
         return self.json_response(200, {"user": row_dict(user)})
 
     def update_account(self, user_id: str, data: dict[str, Any]):
-        allowed = {"display_name", "current_password", "new_password", "email"}
+        allowed = {"display_name", "current_password", "new_password", "email", "timezone"}
         unknown = set(data) - allowed
-        if unknown or not set(data) & {"display_name", "new_password", "email"}:
+        if unknown or not set(data) & {"display_name", "new_password", "email", "timezone"}:
             raise ApiError(422, "invalid_account_update", "Укажите поля аккаунта для изменения")
         timestamp = now_iso()
         with connect() as db:
@@ -815,6 +931,13 @@ class Application:
                 if not name or len(name) > 80:
                     raise ApiError(422, "invalid_name", "Укажите имя до 80 символов")
                 updates["display_name"] = name
+            if "timezone" in data:
+                timezone = str(data["timezone"])
+                try:
+                    ZoneInfo(timezone)
+                except ZoneInfoNotFoundError as exc:
+                    raise ApiError(422, "invalid_timezone", "Укажите корректную часовую зону IANA") from exc
+                updates["timezone"] = timezone
             if password_change:
                 new_password = str(data.get("new_password", ""))
                 if len(new_password) < 8:
@@ -848,7 +971,7 @@ class Application:
                     raise ApiError(503, "email_delivery_failed", "Не удалось отправить письмо. Повторите позже") from exc
             if updates:
                 db.execute(f"UPDATE users SET {','.join(f'{field}=?' for field in updates)} WHERE id=?", (*updates.values(), user_id))
-            updated = db.execute("SELECT id,email,display_name,created_at,email_verified_at FROM users WHERE id=?", (user_id,)).fetchone()
+            updated = db.execute("SELECT id,email,display_name,timezone,created_at,email_verified_at FROM users WHERE id=?", (user_id,)).fetchone()
         response: dict[str, Any] = {"user": row_dict(updated)}
         if pending_email:
             response["email_change_pending"] = pending_email
@@ -857,10 +980,24 @@ class Application:
     def api(self, method: str, path: str, user_id: str, environ: dict[str, Any]):
         if path == "/api/v1/me" and method == "GET":
             with connect() as db:
-                user = db.execute("SELECT id,email,display_name,created_at,email_verified_at FROM users WHERE id=?", (user_id,)).fetchone()
+                user = db.execute("SELECT id,email,display_name,timezone,created_at,email_verified_at FROM users WHERE id=?", (user_id,)).fetchone()
             return self.json_response(200, {"user": row_dict(user)})
         if path == "/api/v1/account" and method == "PATCH":
             return self.update_account(user_id, self.body(environ))
+        if path == "/api/v1/sessions" and method == "GET":
+            token = environ.get("HTTP_AUTHORIZATION", "")[7:]
+            current_id = (token_payload(token) or {}).get("sid")
+            with connect() as db:
+                rows = db.execute("SELECT id,label,created_at,last_used_at,expires_at FROM sessions WHERE user_id=? AND revoked_at IS NULL AND expires_at>? ORDER BY last_used_at DESC", (user_id, now_iso())).fetchall()
+            return self.json_response(200, {"sessions": [{**dict(row), "current": row["id"] == current_id} for row in rows]})
+        session = re.fullmatch(r"/api/v1/sessions/([^/]+)", path)
+        if session and method == "DELETE":
+            timestamp = now_iso()
+            with connect() as db:
+                result = db.execute("UPDATE sessions SET revoked_at=? WHERE id=? AND user_id=? AND revoked_at IS NULL", (timestamp, session.group(1), user_id))
+            if not result.rowcount:
+                raise ApiError(404, "not_found", "Сессия не найдена")
+            return self.json_response(200, {"deleted": True, "id": session.group(1), "updated_at": timestamp})
         if path == "/api/v1/projects" and method == "GET":
             query = parse_qs(environ.get("QUERY_STRING", ""))
             archive_filter = "" if query.get("include_archived") == ["true"] else (" AND archived_at IS NOT NULL" if query.get("archived") == ["true"] else " AND archived_at IS NULL")
@@ -1064,7 +1201,16 @@ class Application:
         if task_move and method == "POST":
             return self.move_task(user_id, task_move.group(1), self.body(environ))
         if path == "/api/v1/sync" and method == "GET":
-            since = parse_qs(environ.get("QUERY_STRING", "")).get("since", ["1970-01-01T00:00:00.000Z"])[0]
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            cursor = query.get("cursor", [None])[0]
+            limit_value = query.get("limit", ["500"])[0]
+            try:
+                limit = int(limit_value)
+                if not 1 <= limit <= 500:
+                    raise ValueError
+            except ValueError as exc:
+                raise ApiError(422, "invalid_limit", "Параметр limit должен быть целым от 1 до 500") from exc
+            since = query.get("since", ["1970-01-01T00:00:00.000Z"])[0]
             try:
                 parsed_since = datetime.fromisoformat(since.replace("Z", "+00:00"))
                 if parsed_since.tzinfo is None:
@@ -1072,18 +1218,30 @@ class Application:
                 since = parsed_since.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             except (ValueError, TypeError) as exc:
                 raise ApiError(422, "invalid_cursor", "Параметр since должен быть датой ISO 8601 с часовым поясом") from exc
-            server_time = now_iso()
+            position = sync_cursor_decode(cursor) if cursor else None
+            server_time = position["snapshot"] if position else now_iso()
+            entries = []
             with connect() as db:
-                tasks = db.execute("SELECT * FROM tasks WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                projects = db.execute("SELECT * FROM projects WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                columns = db.execute("SELECT * FROM kanban_columns WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                checklist_items = db.execute("SELECT * FROM checklist_items WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                messages = db.execute("SELECT m.*,u.display_name AS author_name FROM task_messages m JOIN users u ON u.id=m.author_id WHERE m.owner_id=? AND m.updated_at>? AND m.updated_at<=? ORDER BY m.updated_at", (user_id, since, server_time)).fetchall()
-                note_folders = db.execute("SELECT * FROM note_folders WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                notes = db.execute("SELECT * FROM notes WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                note_links = db.execute("SELECT * FROM note_links WHERE owner_id=? AND updated_at>? AND updated_at<=? ORDER BY updated_at", (user_id, since, server_time)).fetchall()
-                history = db.execute("SELECT * FROM task_history WHERE owner_id=? AND created_at>? AND created_at<=? ORDER BY created_at,id", (user_id, since, server_time)).fetchall()
-            return self.json_response(200, {"cursor": server_time, "tasks": [task_dict(row) for row in tasks], "projects": [dict(row) for row in projects], "kanban_columns": [dict(row) for row in columns], "checklist_items": [checklist_dict(row) for row in checklist_items], "task_messages": [dict(row) for row in messages], "note_folders": [dict(row) for row in note_folders], "notes": [note_dict(row) for row in notes], "note_links": [dict(row) for row in note_links], "task_history": [{**dict(row), "changes": json.loads(row["changes"])} for row in history]})
+                for entity, timestamp_column, table in SYNC_TABLES:
+                    if entity == "task_messages":
+                        rows = db.execute("SELECT m.*,u.display_name AS author_name FROM task_messages m JOIN users u ON u.id=m.author_id WHERE m.owner_id=? AND m.updated_at>? AND m.updated_at<=?", (user_id, since, server_time)).fetchall()
+                    else:
+                        rows = db.execute(f"SELECT * FROM {table} WHERE owner_id=? AND {timestamp_column}>? AND {timestamp_column}<=?", (user_id, since, server_time)).fetchall()
+                    for row in rows:
+                        value = task_dict(row) if entity == "tasks" else checklist_dict(row) if entity == "checklist_items" else note_dict(row) if entity == "notes" else {**dict(row), "changes": json.loads(row["changes"])} if entity == "task_history" else dict(row)
+                        entries.append((row[timestamp_column], entity, row["id"], value))
+            entries.sort(key=lambda entry: entry[:3])
+            if position:
+                entries = [entry for entry in entries if entry[:3] > (position["timestamp"], position["entity"], position["id"])]
+            page, remaining = entries[:limit], entries[limit:]
+            response: dict[str, Any] = {"snapshot": server_time, "cursor": page[-1][0] if page else server_time, "has_more": bool(remaining), "next_cursor": sync_cursor_encode(server_time, *page[-1][:3]) if remaining else None}
+            for _, entity, _, value in page:
+                response.setdefault(entity, []).append(value)
+            for entity, _, _ in SYNC_TABLES:
+                response.setdefault(entity, [])
+            return self.compressed_json_response(200, response, environ)
+        if path == "/api/v1/sync/mutations" and method == "POST":
+            return self.apply_mutations(user_id, self.body(environ))
         if path.startswith("/api/v1/tasks/"):
             task_id = path.rsplit("/", 1)[-1]
             if method == "PATCH":
@@ -1106,6 +1264,56 @@ class Application:
             return str(uuid.UUID(value))
         except ValueError as exc:
             raise ApiError(422, "invalid_client_id", "X-Client-ID должен быть UUID") from exc
+
+    def apply_mutations(self, user_id: str, payload: dict[str, Any]):
+        mutations = payload.get("mutations")
+        if not isinstance(mutations, list) or not mutations or len(mutations) > 100:
+            raise ApiError(422, "invalid_mutations", "Передайте от 1 до 100 команд")
+        results = []
+        for mutation in mutations:
+            if not isinstance(mutation, dict):
+                raise ApiError(422, "invalid_mutation", "Команда должна быть объектом")
+            try:
+                mutation_id = str(uuid.UUID(str(mutation.get("id", ""))))
+            except ValueError as exc:
+                raise ApiError(422, "invalid_mutation_id", "id команды должен быть UUID") from exc
+            with connect() as db:
+                saved = db.execute("SELECT status,response FROM client_mutations WHERE owner_id=? AND id=?", (user_id, mutation_id)).fetchone()
+            if saved:
+                results.append({"id": mutation_id, "status": saved["status"], "response": json.loads(saved["response"]), "replayed": True})
+                continue
+            operation = mutation.get("operation")
+            task_id = mutation.get("task_id")
+            body = mutation.get("body", {})
+            try:
+                if operation == "create":
+                    if not isinstance(task_id, str) or not isinstance(body, dict):
+                        raise ApiError(422, "invalid_mutation", "body команды должен быть объектом")
+                    try:
+                        task_id = str(uuid.UUID(task_id))
+                    except ValueError as exc:
+                        raise ApiError(422, "invalid_task_id", "task_id должен быть UUID") from exc
+                    encoded_body = json.dumps(body).encode()
+                    status, _, response = self.api("POST", "/api/v1/tasks", user_id, {"HTTP_X_CLIENT_ID": task_id, "wsgi.input": io.BytesIO(encoded_body), "CONTENT_LENGTH": str(len(encoded_body))})
+                elif operation == "update" and isinstance(task_id, str) and isinstance(body, dict):
+                    status, _, response = self.update_task(user_id, task_id, body.copy())
+                elif operation == "delete" and isinstance(task_id, str):
+                    status, _, response = self.delete_task(user_id, task_id, {})
+                else:
+                    raise ApiError(422, "invalid_mutation", "Неподдерживаемая команда")
+                decoded = json.loads(response)
+            except ApiError as exc:
+                status, decoded = exc.status, {"error": {"code": exc.code, "message": exc.message}}
+                if exc.status == 409 and isinstance(task_id, str):
+                    with connect() as db:
+                        current = db.execute("SELECT * FROM tasks WHERE id=? AND owner_id=? AND deleted_at IS NULL", (task_id, user_id)).fetchone()
+                    if current:
+                        decoded["current_task"] = task_dict(current)
+            with connect() as db:
+                db.execute("INSERT OR IGNORE INTO client_mutations(owner_id,id,status,response,created_at) VALUES (?,?,?,?,?)", (user_id, mutation_id, status, json.dumps(decoded, ensure_ascii=False, separators=(",", ":")), now_iso()))
+                saved = db.execute("SELECT status,response FROM client_mutations WHERE owner_id=? AND id=?", (user_id, mutation_id)).fetchone()
+            results.append({"id": mutation_id, "status": saved["status"], "response": json.loads(saved["response"]), "replayed": False})
+        return self.json_response(200, {"mutations": results})
 
     def update_task(self, user_id: str, task_id: str, payload: dict[str, Any]):
         expected = payload.pop("expected_version", None)
@@ -2044,7 +2252,7 @@ class Application:
         file_path = (STATIC_DIR / filename).resolve()
         if STATIC_DIR.resolve() not in file_path.parents or not file_path.is_file():
             file_path = STATIC_DIR / "index.html"
-        mime = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml"}.get(file_path.suffix, "application/octet-stream")
+        mime = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json; charset=utf-8"}.get(file_path.suffix, "application/octet-stream")
         body = file_path.read_bytes()
         return 200, [("Content-Type", mime), ("Content-Length", str(len(body)))], body
 

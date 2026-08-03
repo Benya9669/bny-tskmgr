@@ -2,6 +2,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {
   token: localStorage.getItem('taskflow_token'),
+  refreshToken: localStorage.getItem('taskflow_refresh_token'),
   user: null,
   tasks: [],
   projects: [],
@@ -21,6 +22,8 @@ const state = {
   noteSaveTimer: null,
   noteSaveInFlight: false,
   noteSavePending: false,
+  offlineSnapshot: false,
+  conflicts: [],
   expandedChecklistTasks: new Set(),
   filter: 'today',
   sort: 'priority',
@@ -148,12 +151,28 @@ $('#skipLink').addEventListener('click', event => {
   const target = document.querySelector(event.currentTarget.hash);
   if (target) requestAnimationFrame(() => target.focus());
 });
-const api = async (path, options = {}) => {
+let refreshInFlight = null;
+async function refreshAccessToken() {
+  if (!state.refreshToken) return false;
+  refreshInFlight ||= fetch('/api/v1/auth/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: state.refreshToken }) })
+    .then(async response => {
+      if (!response.ok) return false;
+      const data = await response.json();
+      state.token = data.token;
+      state.refreshToken = data.refresh_token;
+      localStorage.setItem('taskflow_token', data.token);
+      localStorage.setItem('taskflow_refresh_token', data.refresh_token);
+      return true;
+    }).catch(() => false).finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
+}
+const api = async (path, options = {}, retried = false) => {
   const response = await fetch(`/api/v1${path}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers },
   });
   const data = await response.json();
+  if (response.status === 401 && state.token && !retried && await refreshAccessToken()) return api(path, options, true);
   if (response.status === 401 && state.token) logout();
   if (!response.ok) {
     const error = new Error(data.error?.message || 'Не удалось выполнить запрос');
@@ -162,6 +181,113 @@ const api = async (path, options = {}) => {
   }
   return data;
 };
+const offlineSnapshotKey = () => `taskflow_snapshot_${state.token || 'anonymous'}`;
+const saveOfflineSnapshot = () => {
+  if (!state.user) return;
+  localStorage.setItem(offlineSnapshotKey(), JSON.stringify({
+    user: state.user, tasks: state.tasks, projects: state.projects, archivedProjects: state.archivedProjects,
+    kanbanColumns: state.kanbanColumns, checklistItems: state.checklistItems, noteFolders: state.noteFolders,
+    notes: state.notes, noteLinks: state.noteLinks, version: state.version,
+  }));
+};
+const loadOfflineSnapshot = () => {
+  try {
+    const snapshot = JSON.parse(localStorage.getItem(offlineSnapshotKey()) || 'null');
+    if (!snapshot?.user || !Array.isArray(snapshot.tasks)) return false;
+    Object.assign(state, snapshot, { offlineSnapshot: true });
+    return true;
+  } catch (_) { return false; }
+};
+const mutationQueueKey = () => `taskflow_mutations_${state.token || 'anonymous'}`;
+const mutationQueue = () => {
+  try { return JSON.parse(localStorage.getItem(mutationQueueKey()) || '[]'); } catch (_) { return []; }
+};
+const saveMutationQueue = queue => localStorage.setItem(mutationQueueKey(), JSON.stringify(queue));
+function showNextConflict() {
+  const conflict = state.conflicts[0];
+  if (!conflict || $('#conflictDialog').open) return;
+  const current = conflict.current_task;
+  if (!current) return;
+  $('#conflictDescription').textContent = `Задача «${current.title}» была изменена на другом устройстве.`;
+  $('#conflictServerTitle').textContent = current.title;
+  $('#conflictLocalTitle').textContent = conflict.operation === 'delete' ? 'Удалить задачу' : (conflict.body.title || current.title);
+  $('#conflictDialog').showModal();
+}
+function removeConflict(conflict) {
+  saveMutationQueue(mutationQueue().filter(mutation => mutation.id !== conflict.id));
+  state.conflicts = state.conflicts.filter(item => item.id !== conflict.id);
+  $('#conflictDialog').close();
+  saveOfflineSnapshot();
+  render();
+  showNextConflict();
+}
+$('#keepServerConflict').addEventListener('click', () => {
+  const conflict = state.conflicts[0];
+  if (!conflict) return;
+  const current = conflict.current_task;
+  state.tasks = [...state.tasks.filter(task => task.id !== current.id), current];
+  removeConflict(conflict);
+  toast('Оставлена серверная версия задачи.');
+});
+$('#keepLocalConflict').addEventListener('click', async () => {
+  const conflict = state.conflicts[0];
+  if (!conflict) return;
+  const current = conflict.current_task;
+  const replacement = { ...conflict, id: crypto.randomUUID(), body: conflict.operation === 'update' ? { ...conflict.body, expected_version: current.version } : undefined };
+  removeConflict(conflict);
+  const queue = mutationQueue();
+  queue.push(replacement);
+  saveMutationQueue(queue);
+  await flushMutationQueue();
+});
+$$('[data-conflict-close]').forEach(button => button.addEventListener('click', () => $('#conflictDialog').close()));
+async function flushMutationQueue() {
+  const queue = mutationQueue();
+  if (!queue.length || !navigator.onLine) return;
+  try {
+    const { mutations } = await api('/sync/mutations', { method: 'POST', body: JSON.stringify({ mutations: queue }) });
+    const pending = [];
+    mutations.forEach(result => {
+      if (result.status >= 200 && result.status < 300) {
+        const task = result.response.task;
+        if (task) state.tasks = [...state.tasks.filter(item => item.id !== task.id), task];
+        const nextTask = result.response.next_task;
+        if (nextTask) state.tasks = [...state.tasks.filter(item => item.id !== nextTask.id), nextTask];
+      } else if (result.status === 409) {
+        const mutation = queue.find(item => item.id === result.id);
+        if (mutation) pending.push({ ...mutation, current_task: result.response.current_task });
+      }
+    });
+    saveMutationQueue(pending.filter(Boolean));
+    state.offlineSnapshot = Boolean(pending.length);
+    saveOfflineSnapshot();
+    render();
+    state.conflicts = pending.filter(item => item.current_task);
+    if (pending.length) {
+      toast('Есть конфликт офлайн-изменений. Выберите версию задачи.');
+      showNextConflict();
+    }
+    else toast('Офлайн-изменения синхронизированы.');
+  } catch (_) { /* Keep the queue until a later connection is available. */ }
+}
+async function applyTaskMutation(mutation, applyLocal) {
+  applyLocal();
+  saveOfflineSnapshot();
+  render();
+  const queue = mutationQueue();
+  queue.push(mutation);
+  saveMutationQueue(queue);
+  if (!navigator.onLine) {
+    state.offlineSnapshot = true;
+    return { queued: true };
+  }
+  await flushMutationQueue();
+  return { queued: mutationQueue().some(item => item.id === mutation.id) };
+}
+addEventListener('online', () => {
+  if (!state.token || (!state.offlineSnapshot && !mutationQueue().length)) return;
+  flushMutationQueue().then(() => bootstrap()).then(() => toast('Подключение восстановлено. Сохранённая копия обновлена.'));
+});
 const reminderTimers = new Map();
 const shownReminderKey = task => `taskflow_reminder_${task.id}_${task.due_at}`;
 
@@ -271,10 +397,15 @@ async function bootstrap() {
     const projects = allProjects.filter(project => !project.archived_at);
     const archivedProjects = allProjects.filter(project => project.archived_at);
     Object.assign(state, { user, tasks, projects, archivedProjects, kanbanColumns, checklistItems, noteFolders, notes, noteLinks, version: health.version });
+    state.offlineSnapshot = false;
+    saveOfflineSnapshot();
     setAuthenticated(true);
     render();
   } catch {
-    logout();
+    if (!loadOfflineSnapshot()) return logout();
+    setAuthenticated(true);
+    render();
+    toast('Открыта сохранённая копия. Подключитесь к сети, чтобы синхронизировать изменения.');
   }
 }
 
@@ -313,7 +444,9 @@ $('#authForm').addEventListener('submit', async (event) => {
       return;
     }
     state.token = data.token;
+    state.refreshToken = data.refresh_token || null;
     localStorage.setItem('taskflow_token', state.token);
+    if (state.refreshToken) localStorage.setItem('taskflow_refresh_token', state.refreshToken);
     await bootstrap();
   } catch (error) {
     $('#authError').textContent = error.message;
@@ -366,26 +499,41 @@ $('#passwordResetForm').addEventListener('submit', async event => {
 async function logout() {
   if (state.view === 'notes') await flushNoteSave();
   state.token = null;
+  state.refreshToken = null;
   localStorage.removeItem('taskflow_token');
+  localStorage.removeItem('taskflow_refresh_token');
   showLanding();
 }
 function openAccountDialog() {
   $('#accountName').value = state.user.display_name;
   $('#accountEmail').value = state.user.email;
+  $('#accountTimezone').value = state.user.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   $('#accountCurrentPassword').value = '';
   $('#accountNewPassword').value = '';
   $('#accountError').textContent = '';
   $('#accountSuccess').textContent = '';
   $('#accountDialog').showModal();
+  api('/sessions').then(({ sessions }) => {
+    $('#sessionList').innerHTML = sessions.map(session => `<div class="session-row"><div><strong>${escapeHtml(session.label)}${session.current ? ' (это устройство)' : ''}</strong><small>Активна до ${new Date(session.expires_at).toLocaleString('ru-RU')}</small></div><button class="secondary revoke-session" type="button" data-session-id="${session.id}">Завершить</button></div>`).join('') || '<small>Нет активных сессий.</small>';
+    $$('.revoke-session', $('#sessionList')).forEach(button => button.addEventListener('click', async () => {
+      const session = sessions.find(item => item.id === button.dataset.sessionId);
+      if (!session || !await confirmAction({ title: 'Завершить сессию?', message: `Устройство «${session.label}» потеряет доступ.`, confirmLabel: 'Завершить', danger: true })) return;
+      await api(`/sessions/${session.id}`, { method: 'DELETE' });
+      if (session.current) return logout();
+      openAccountDialog();
+      toast('Сессия завершена.');
+    }));
+  }).catch(() => { $('#sessionList').textContent = 'Не удалось загрузить активные устройства.'; });
 }
 $('#logout').addEventListener('click', openAccountDialog);
 $('#mobileLogout').addEventListener('click', logout);
+$('#accountLogout').addEventListener('click', logout);
 $$('[data-account-close]').forEach(button => button.addEventListener('click', () => $('#accountDialog').close()));
 $('#accountForm').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget;
   const submit = event.submitter;
-  const data = { display_name: form.elements.display_name.value.trim() };
+  const data = { display_name: form.elements.display_name.value.trim(), timezone: form.elements.timezone.value };
   const email = form.elements.email.value.trim();
   if (email && email !== state.user.email) data.email = email;
   if (form.elements.new_password.value) data.new_password = form.elements.new_password.value;
@@ -1517,6 +1665,10 @@ $$('.nav-item, .mobile-nav-item, .mobile-menu-item').forEach(button => button.ad
   render();
 }));
 $('#mobileMore').addEventListener('click', () => $('#mobileMoreDialog').showModal());
+$('#mobileAccount').addEventListener('click', () => {
+  $('#mobileMoreDialog').close();
+  openAccountDialog();
+});
 $$('[data-mobile-more-close]').forEach(button => button.addEventListener('click', () => $('#mobileMoreDialog').close()));
 $$('[data-task-view]').forEach(button => button.addEventListener('click', () => {
   state.view = button.dataset.taskView;
@@ -1669,11 +1821,15 @@ $('#taskForm').addEventListener('submit', async event => {
     const requestReminderPermission = raw.reminder_offsets.length && raw.due_at && 'Notification' in window && Notification.permission === 'default';
     if (id) {
       const old = state.tasks.find(task => task.id === id);
-      const { task } = await api(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ ...raw, expected_version: old.version }) });
-      state.tasks = state.tasks.map(item => item.id === id ? task : item);
+      await applyTaskMutation({ id: crypto.randomUUID(), operation: 'update', task_id: id, body: { ...raw, expected_version: old.version } }, () => {
+        state.tasks = state.tasks.map(item => item.id === id ? { ...item, ...raw, version: item.version + 1 } : item);
+      });
     } else {
-      const { task } = await api('/tasks', { method: 'POST', body: JSON.stringify(raw) });
-      state.tasks.push(task);
+      const taskId = crypto.randomUUID();
+      const column = state.kanbanColumns.find(item => item.semantic_status === (raw.status || 'inbox')) || state.kanbanColumns[0];
+      await applyTaskMutation({ id: crypto.randomUUID(), operation: 'create', task_id: taskId, body: raw }, () => {
+        state.tasks.push({ id: taskId, owner_id: state.user.id, column_id: column?.id || null, kanban_position: Number.MAX_SAFE_INTEGER, description: '', priority: 'normal', status: column?.semantic_status || 'inbox', recurrence: null, reminder_offsets: [], tags: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: 1, deleted_at: null, ...raw });
+      });
     }
     $('#taskDialog').close();
     let reminderMessage = '';
@@ -1755,10 +1911,10 @@ $('#moveTaskForm').addEventListener('submit', async event => {
 
 async function patchTask(old, changes, successMessage = '') {
   try {
-    const { task, next_task: nextTask } = await api(`/tasks/${old.id}`, { method: 'PATCH', body: JSON.stringify({ ...changes, expected_version: old.version }) });
-    state.tasks = [...state.tasks.map(item => item.id === old.id ? task : item), ...(nextTask ? [nextTask] : [])];
-    render();
-    if (successMessage) toast(nextTask ? `${successMessage}. Следующая задача создана` : successMessage);
+    const { queued } = await applyTaskMutation({ id: crypto.randomUUID(), operation: 'update', task_id: old.id, body: { ...changes, expected_version: old.version } }, () => {
+      state.tasks = state.tasks.map(item => item.id === old.id ? { ...item, ...changes, version: item.version + 1 } : item);
+    });
+    if (successMessage) toast(queued ? 'Изменение сохранено для синхронизации.' : successMessage);
   } catch (error) {
     render();
     toast(error.message);
@@ -1768,12 +1924,12 @@ async function patchTask(old, changes, successMessage = '') {
 async function deleteTask(task) {
   if (!await confirmAction({ title: 'Удалить задачу?', message: `«${task.title}» и её подзадачи будут удалены.`, confirmLabel: 'Удалить', danger: true })) return;
   try {
-    await api(`/tasks/${task.id}`, { method: 'DELETE' });
-    state.tasks = state.tasks.filter(item => item.id !== task.id);
-    state.checklistItems = state.checklistItems.filter(item => item.task_id !== task.id);
-    state.expandedChecklistTasks.delete(task.id);
-    render();
-    toast('Задача удалена');
+    const { queued } = await applyTaskMutation({ id: crypto.randomUUID(), operation: 'delete', task_id: task.id }, () => {
+      state.tasks = state.tasks.filter(item => item.id !== task.id);
+      state.checklistItems = state.checklistItems.filter(item => item.task_id !== task.id);
+      state.expandedChecklistTasks.delete(task.id);
+    });
+    toast(queued ? 'Удаление сохранено для синхронизации.' : 'Задача удалена');
   } catch (error) { toast(error.message); }
 }
 
@@ -2024,7 +2180,9 @@ async function startApplication() {
   try {
     const data = await api('/auth/verify-email', { method: 'POST', body: JSON.stringify({ token: verificationToken }) });
     state.token = data.token;
+    state.refreshToken = data.refresh_token || null;
     localStorage.setItem('taskflow_token', state.token);
+    if (state.refreshToken) localStorage.setItem('taskflow_refresh_token', state.refreshToken);
     history.replaceState({}, '', location.pathname);
     await bootstrap();
     toast('Email подтверждён. Добро пожаловать!');

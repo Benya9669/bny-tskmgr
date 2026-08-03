@@ -1,4 +1,5 @@
 import io
+import gzip
 import json
 import sqlite3
 import tempfile
@@ -68,6 +69,23 @@ class ApiTests(unittest.TestCase):
         status, sync = self.client.request("GET", "/api/v1/sync?since=1970-01-01T00:00:00.000Z")
         self.assertEqual(status, 200)
         self.assertIsNotNone(sync["tasks"][0]["deleted_at"])
+
+    def test_pwa_manifest_and_icons_are_served_with_expected_types(self):
+        status, headers, body = self.client.app.dispatch({"REQUEST_METHOD": "GET", "PATH_INFO": "/manifest.webmanifest"})
+        self.assertEqual(status, 200)
+        self.assertIn(("Content-Type", "application/manifest+json; charset=utf-8"), headers)
+        manifest = json.loads(body)
+        self.assertEqual((manifest["display"], manifest["start_url"], manifest["scope"]), ("standalone", "/", "/"))
+        self.assertEqual({icon["purpose"] for icon in manifest["icons"]}, {"any", "maskable"})
+        for icon in manifest["icons"]:
+            status, headers, _ = self.client.app.dispatch({"REQUEST_METHOD": "GET", "PATH_INFO": icon["src"]})
+            self.assertEqual(status, 200)
+            self.assertIn(("Content-Type", "image/svg+xml"), headers)
+        status, headers, worker = self.client.app.dispatch({"REQUEST_METHOD": "GET", "PATH_INFO": "/sw.js"})
+        self.assertEqual(status, 200)
+        self.assertIn(("Content-Type", "application/javascript; charset=utf-8"), headers)
+        self.assertIn(b'url.pathname.startsWith("/api/")', worker)
+        self.assertNotIn(b"skipWaiting", worker)
 
     def test_password_reset_and_account_updates_are_secure(self):
         sent = []
@@ -920,6 +938,98 @@ class ApiTests(unittest.TestCase):
             version = db.execute("PRAGMA user_version").fetchone()[0]
         self.assertTrue({"password_reset_tokens", "pending_email_change_tokens"}.issubset(tables))
         self.assertEqual(version, server.SCHEMA_VERSION)
+
+    def test_schema_v14_migration_adds_client_mutations(self):
+        server.init_db()
+        with server.connect() as db:
+            db.execute("DROP TABLE client_mutations")
+            db.execute("PRAGMA user_version=14")
+        server.init_db()
+        with server.connect() as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertIn("client_mutations", tables)
+        self.assertEqual(version, server.SCHEMA_VERSION)
+
+    def test_schema_v15_migration_adds_sessions(self):
+        server.init_db()
+        with server.connect() as db:
+            db.execute("DROP TABLE sessions")
+            db.execute("PRAGMA user_version=15")
+        server.init_db()
+        with server.connect() as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertIn("sessions", tables)
+        self.assertEqual(version, server.SCHEMA_VERSION)
+
+    def test_schema_v16_migration_adds_timezone_and_validates_updates(self):
+        server.init_db()
+        with server.connect() as db:
+            db.execute("PRAGMA user_version=16")
+            db.execute("ALTER TABLE users DROP COLUMN timezone")
+        server.init_db()
+        status, updated = self.client.request("PATCH", "/api/v1/account", {"timezone": "Europe/Moscow"})
+        self.assertEqual((status, updated["user"]["timezone"]), (200, "Europe/Moscow"))
+        status, invalid = self.client.request("PATCH", "/api/v1/account", {"timezone": "Mars/Olympus"})
+        self.assertEqual((status, invalid["error"]["code"]), (422, "invalid_timezone"))
+
+    def test_sync_is_paginated_bounded_and_gzip_capable(self):
+        created = [self.client.request("POST", "/api/v1/tasks", {"title": f"Пагинация {number}"})[1]["task"]["id"] for number in range(3)]
+        status, first = self.client.request("GET", "/api/v1/sync?limit=1")
+        self.assertEqual((status, first["has_more"]), (200, True))
+        task_ids, page = [task["id"] for task in first["tasks"]], first
+        while page["has_more"]:
+            status, page = self.client.request("GET", f"/api/v1/sync?limit=1&cursor={page['next_cursor']}")
+            self.assertEqual((status, page["snapshot"]), (200, first["snapshot"]))
+            task_ids.extend(task["id"] for task in page["tasks"])
+        self.assertEqual(set(created), set(task_ids))
+        self.assertEqual(self.client.request("GET", "/api/v1/sync?limit=501")[0], 422)
+        self.assertEqual(self.client.request("GET", "/api/v1/sync?cursor=invalid")[0], 422)
+
+    def test_sync_gzip_response_and_openapi_contract(self):
+        for number in range(20):
+            self.client.request("POST", "/api/v1/tasks", {"title": f"Сжатый sync {number}", "description": "x" * 100})
+        captured = {}
+        response = server.Application()({"REQUEST_METHOD": "GET", "PATH_INFO": "/api/v1/sync", "QUERY_STRING": "limit=500", "CONTENT_LENGTH": "0", "wsgi.input": io.BytesIO(), "HTTP_AUTHORIZATION": f"Bearer {self.client.token}", "HTTP_ACCEPT_ENCODING": "gzip"}, lambda status, headers: captured.update(status=status, headers=dict(headers)))
+        body = b"".join(response)
+        self.assertEqual((captured["status"].split()[0], captured["headers"].get("Content-Encoding"), len(json.loads(gzip.decompress(body))["tasks"]) >= 20), ("200", "gzip", True))
+        spec = json.loads((Path(__file__).parent.parent / "docs" / "openapi.json").read_text(encoding="utf-8"))
+        self.assertTrue({"/sync", "/sync/mutations", "/auth/refresh", "/sessions", "/sessions/{sessionId}"}.issubset(spec["paths"]))
+
+    def test_task_mutation_batch_is_idempotent(self):
+        mutation_id, task_id = "879bdb7d-7680-4667-9b20-55aceba60be7", "022d0b10-f4f3-4a07-9861-96d747ccd1ed"
+        payload = {"mutations": [{"id": mutation_id, "operation": "create", "task_id": task_id, "body": {"title": "Офлайн задача", "scheduled_date": "2026-08-03"}}]}
+        status, first = self.client.request("POST", "/api/v1/sync/mutations", payload)
+        self.assertEqual((status, first["mutations"][0]["status"], first["mutations"][0]["response"]["task"]["id"]), (200, 201, task_id))
+        status, replay = self.client.request("POST", "/api/v1/sync/mutations", payload)
+        self.assertEqual((status, replay["mutations"][0]["replayed"]), (200, True))
+        status, tasks = self.client.request("GET", "/api/v1/tasks")
+        self.assertEqual([task["id"] for task in tasks["tasks"] if task["id"] == task_id], [task_id])
+
+    def test_task_mutation_conflict_includes_current_task(self):
+        status, created = self.client.request("POST", "/api/v1/tasks", {"title": "Серверная задача"})
+        task = created["task"]
+        self.client.request("PATCH", f"/api/v1/tasks/{task['id']}", {"title": "Изменено на сервере", "expected_version": 1})
+        payload = {"mutations": [{"id": "c7b2cf10-ddec-4ee0-a6c9-06ab5a9ff4f6", "operation": "update", "task_id": task["id"], "body": {"title": "Офлайн версия", "expected_version": 1}}]}
+        status, response = self.client.request("POST", "/api/v1/sync/mutations", payload)
+        result = response["mutations"][0]
+        self.assertEqual((status, result["status"], result["response"]["current_task"]["title"]), (200, 409, "Изменено на сервере"))
+
+    def test_refresh_rotation_session_listing_and_revoke(self):
+        client = ApiClient()
+        login = client.request("POST", "/api/v1/auth/login", {"email": "user@example.com", "password": "correct-horse", "device_name": "Тестовый браузер"})[1]
+        self.assertIn("refresh_token", login)
+        client.token = login["token"]
+        status, sessions = client.request("GET", "/api/v1/sessions")
+        self.assertEqual((status, sessions["sessions"][0]["label"], sessions["sessions"][0]["current"]), (200, "Тестовый браузер", True))
+        status, refreshed = client.request("POST", "/api/v1/auth/refresh", {"refresh_token": login["refresh_token"]})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(login["refresh_token"], refreshed["refresh_token"])
+        self.assertEqual(client.request("POST", "/api/v1/auth/refresh", {"refresh_token": login["refresh_token"]})[0], 401)
+        client.token = refreshed["token"]
+        self.assertEqual(client.request("DELETE", f"/api/v1/sessions/{refreshed['session_id']}")[0], 200)
+        self.assertEqual(client.request("GET", "/api/v1/me")[0], 401)
 
     def test_smtp_sender_uses_starttls_and_keeps_token_out_of_request_url(self):
         previous = (

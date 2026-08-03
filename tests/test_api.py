@@ -104,6 +104,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(status, 200)
             status, login = anonymous.request("POST", "/api/v1/auth/login", {"email": "user@example.com", "password": "new-correct-horse"})
             self.assertEqual(status, 200)
+            self.assertEqual(login["user"]["timezone"], "UTC")
             self.client.token = login["token"]
             status, denied = self.client.request("PATCH", "/api/v1/account", {"new_password": "another-password"})
             self.assertEqual((status, denied["error"]["code"]), (403, "invalid_current_password"))

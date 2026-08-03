@@ -770,7 +770,7 @@ class Application:
         if not user["email_verified_at"]:
             raise ApiError(403, "email_not_verified", "Сначала подтвердите email по ссылке из письма")
         tokens = self.create_session(user["id"], str(data.get("device_name", "Этот браузер")))
-        return self.json_response(200, {**tokens, "user": {"id": user["id"], "email": user["email"], "display_name": user["display_name"]}})
+        return self.json_response(200, {**tokens, "user": row_dict(user)})
 
     def create_session(self, user_id: str, label: str) -> dict[str, str]:
         timestamp = now_iso()

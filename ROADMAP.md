@@ -179,6 +179,7 @@ Roadmap описывает путь от первого работоспособ
 - [x] Android beta: read-only проекты, offline-редактор описания/проекта/дат и локальные фильтры задач по проекту, статусу и приоритету.
 - [x] Android beta: регистрация с подтверждением email, task deep links, Share text-to-inbox и локальные due-date уведомления.
 - [x] Android beta: instrumented sync tests покрывают pagination и refresh token через MockWebServer.
+- [x] Android beta: mutation replay, Room v1-to-v2 migration и email verification link покрыты и проверены на AVD.
 - [x] Базовый Retrofit/Moshi-контракт auth/sync/mutations и безопасное хранение токенов через Android Keystore.
 - [~] Login и восстановление локальной Android-сессии; регистрация и подтверждение email остаются.
 - [x] Pull sync задач, проектов и колонок с pagination/tombstones в Room.

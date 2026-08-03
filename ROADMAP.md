@@ -174,7 +174,7 @@ Roadmap описывает путь от первого работоспособ
 
 - [x] Kotlin + Jetpack Compose: Gradle-каркас, общая дизайн-система TaskFlow и адаптивный app shell.
 - [x] Room как локальный источник данных для задач, проектов, канбан-колонок, sync-курсора и durable outbox.
-- [ ] WorkManager для фоновой синхронизации.
+- [x] WorkManager для фоновой Android-синхронизации: unique network job, retry, batch push и pull sync.
 - [x] Базовый Retrofit/Moshi-контракт auth/sync/mutations и безопасное хранение токенов через Android Keystore.
 - [~] Login и восстановление локальной Android-сессии; регистрация и подтверждение email остаются.
 - [x] Pull sync задач, проектов и колонок с pagination/tombstones в Room.

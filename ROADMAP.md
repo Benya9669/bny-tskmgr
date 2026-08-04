@@ -176,19 +176,19 @@ Roadmap описывает путь от первого работоспособ
 - [x] Room как локальный источник данных для задач, проектов, канбан-колонок, sync-курсора и durable outbox.
 - [x] WorkManager для фоновой Android-синхронизации: unique network job, retry, batch push и pull sync.
 - [x] Android сохраняет version conflicts в Room и предлагает выбрать серверную версию либо повторить локальную с актуальной версией.
-- [x] Android beta: read-only проекты, offline-редактор описания/проекта/дат и локальные фильтры задач по проекту, статусу и приоритету.
-- [x] Android beta: регистрация с подтверждением email, task deep links, Share text-to-inbox и локальные due-date уведомления.
+- [~] Android `0.3.0-alpha`: read-only проекты, offline-редактор описания/проекта/дат и локальные фильтры задач по проекту, статусу и приоритету; product UX ещё развивается до public beta.
+- [x] Android: регистрация с подтверждением email, task deep links, Share text-to-inbox и локальные due-date уведомления.
 - [x] Android beta: instrumented sync tests покрывают pagination и refresh token через MockWebServer.
 - [x] Android beta: mutation replay, Room v1-to-v2 migration и email verification link покрыты и проверены на AVD.
 - [x] Android beta: Compose UI-тесты покрывают login, offline inbox create и разрешение version conflict.
 - [x] Android beta: проверены light/dark и wide layouts, E2E с чистым `v0.2.0` и debug APK hygiene audit.
 - [x] Базовый Retrofit/Moshi-контракт auth/sync/mutations и безопасное хранение токенов через Android Keystore.
-- [~] Login и восстановление локальной Android-сессии; регистрация и подтверждение email остаются.
+- [x] Login, восстановление локальной Android-сессии, регистрация и подтверждение email.
 - [x] Pull sync задач, проектов и колонок с pagination/tombstones в Room.
-- [~] Read-only экраны «Сегодня» и «Входящие» из Room; проекты и редактор задачи остаются.
+- [~] «Сегодня», «Входящие», read-only «Проекты» и редактор задачи работают из Room; UX и project management запланированы в Android `0.3.0`.
 - [x] Offline-создание, редактирование заголовка/приоритета, завершение и удаление задач с durable outbox и batch mutation push при запуске/refresh.
-- [ ] Deep links и системная кнопка «Поделиться в TaskFlow».
-- [ ] Локальные уведомления.
+- [x] Deep links и системная кнопка «Поделиться в TaskFlow».
+- [x] Локальные уведомления.
 
 ## 0.4.0 — совместная работа
 
